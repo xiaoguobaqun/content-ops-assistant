@@ -1,0 +1,8 @@
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import {createRequire} from 'node:module';import {fileURLToPath} from 'node:url';
+
+test('a successful repeated engine build refreshes the artifact even when generated source bytes are unchanged',async t=>{
+  const require=createRequire(import.meta.url),webpack=require('webpack'),root=fileURLToPath(new URL('../',import.meta.url));process.env.NODE_ENV='production';const actual=require('../.electron-vue/webpack.main.config.js');const dir=await fs.mkdtemp(path.join(os.tmpdir(),'engine-freshness-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));const entry=path.join(dir,'entry.js'),out=path.join(dir,'output');const source='module.exports = "same generated source";';await fs.writeFile(entry,source);
+  const config={...actual,context:root,mode:'production',entry:{main:entry},output:{...actual.output,path:out},module:{rules:[]},plugins:[],optimization:{minimize:false},devtool:false};
+  const build=()=>new Promise((resolve,reject)=>{const compiler=webpack(config);compiler.run((error,stats)=>compiler.close(closeError=>error||closeError||stats?.hasErrors()?reject(error||closeError||Error(stats?.toString({all:false,errors:true}))):resolve()));});
+  await build();const artifact=path.join(out,'main.js'),before=await fs.readFile(artifact);await fs.utimes(artifact,new Date(1000),new Date(1000));await fs.writeFile(entry,source);const sourceTime=(await fs.stat(entry)).mtimeMs;await build();assert.deepEqual(await fs.readFile(artifact),before);assert.ok((await fs.stat(artifact)).mtimeMs>=sourceTime,'successful unchanged output must pass the source freshness guard');
+});

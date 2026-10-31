@@ -1,0 +1,274 @@
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { runCli } from "../runner.js";
+
+export const VIDEO_PLATFORMS = ["dy", "ks", "blbl", "bjh", "tt", "sph", "xhs", "fqsp"] as const;
+
+export const publishVideoTool: Tool = {
+  name: "publish_video",
+  description:
+    "Publish a video to a target platform via MatrixMedia. Requires a logged-in account " +
+    "identified by phone number. Partition is derived automatically. Long-running -- emits " +
+    "progress notifications when a progressToken is supplied by the client.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      platform: {
+        type: "string",
+        enum: [...VIDEO_PLATFORMS],
+        description:
+          "Target platform. dy=抖音 ks=快手 blbl=哔哩哔哩 bjh=百家号 tt=头条 sph=视频号 xhs=小红书 fqsp=番茄视频",
+      },
+      file: {
+        type: "string",
+        description: "Absolute path to the video file to upload.",
+      },
+      title: {
+        type: "string",
+        description: "Video title.",
+      },
+      description: {
+        type: "string",
+        description:
+          "Optional video description or body. Douyin/Kuaishou/Shipinhao append tags after this text; Xiaohongshu uses it as body; Bilibili uses it as the introduction field.",
+      },
+      shortTitle: {
+        type: "string",
+        description:
+          "Optional Shipinhao-only short title, recommended 6-16 characters. Ignored by other platforms.",
+      },
+      phone: {
+        type: "string",
+        description:
+          "Phone number of the account to publish with. Used to derive the session partition automatically.",
+      },
+      bt2: {
+        type: "string",
+        description:
+          "Legacy compatibility: Shipinhao short title, or description on other platforms. Prefer description / shortTitle.",
+      },
+      tags: {
+        type: "string",
+        description: "Optional tags string.",
+      },
+      address: {
+        type: "string",
+        description: "Optional location / 地址.",
+      },
+      publishAt: {
+        type: "string",
+        description:
+          'Optional one-time scheduled publish time, format "YYYY-MM-DD HH:mm:ss". Must be in the future; MatrixMedia must be running at that time.',
+      },
+      show: {
+        type: "boolean",
+        description: "If true, show the underlying browser window.",
+      },
+      draft: {
+        type: "boolean",
+        description:
+          "If true, save the video to the platform draft box instead of publishing it.",
+      },
+      creativeStatement: {
+        type: "string",
+        description:
+          "Optional creative statement / mark tag. For Shipinhao supports values like none, ai_generated, fiction, or Chinese labels such as 含AI生成内容.",
+      },
+      cover: {
+        type: "string",
+        description:
+          "Optional absolute path to a custom cover image. Effective for Douyin (dy), Kuaishou (ks) and Shipinhao (sph) single-file publish; 3:4 portrait ratio recommended (1080x1440 fits all three; Douyin auto-generates the horizontal cover from the portrait one; Shipinhao accepts jpg/png only).",
+      },
+      sphProductId: {
+        type: "string",
+        description:
+          "Shipinhao product ID for attaching a shop product. Ignored for other platforms. Prefer this over sphLink for product-only use.",
+      },
+      sphDramaId: {
+        type: "string",
+        description:
+          "Shipinhao mini-drama NAME (not an ID) for attaching a mini-drama (小程序短剧), e.g. 泳陷错恋. The publish page searches by name. Ignored for other platforms. Prefer this over sphLink for drama-only use.",
+      },
+      sphSeriesId: {
+        type: "string",
+        description:
+          "Shipinhao drama-series NAME (not an ID) for attaching a native 视频号剧集 (distinct from mini-drama 小程序短剧). The publish page searches by name. Ignored for other platforms. Prefer this over sphLink for series-only use.",
+      },
+      sphLink: {
+        type: "object",
+        description:
+          "Optional Shipinhao-only link configuration. Ignored for other platforms. If sphProductId, sphDramaId or sphSeriesId is also set, the shortcut field wins.",
+        properties: {
+          type: {
+            type: "string",
+            enum: ["none", "product", "mini_drama", "sph_series"],
+            description:
+              "Shipinhao link type. product selects a shop product by ID; mini_drama attaches a mini-drama by name; sph_series attaches a native drama series by name.",
+          },
+          value: {
+            type: "string",
+            description:
+              "Shipinhao product ID, or mini-drama / drama-series NAME. Required when type=product, type=mini_drama or type=sph_series.",
+          },
+        },
+        required: ["type"],
+      },
+    },
+    required: ["platform", "file", "title", "phone"],
+  },
+};
+
+export async function handlePublishVideo(
+  args: Record<string, unknown>,
+  onProgress?: (elapsed: number) => void
+): Promise<string> {
+  const platform = args.platform;
+  const file = args.file;
+  const title = args.title;
+  const description = args.description;
+  const shortTitle = args.shortTitle;
+  const phone = args.phone;
+  const bt2 = args.bt2;
+  const tags = args.tags;
+  const address = args.address;
+  const publishAt = args.publishAt;
+  const show = args.show;
+  const draft = args.draft;
+  const creativeStatement =
+    args.creativeStatement == null ? "" : String(args.creativeStatement).trim();
+  const cover = args.cover == null ? "" : String(args.cover).trim();
+  const sphProductId =
+    args.sphProductId == null ? "" : String(args.sphProductId).trim();
+  const sphDramaId =
+    args.sphDramaId == null ? "" : String(args.sphDramaId).trim();
+  const sphSeriesId =
+    args.sphSeriesId == null ? "" : String(args.sphSeriesId).trim();
+  const sphLink = args.sphLink;
+
+  if (typeof phone !== "string" || phone.length === 0) {
+    throw new Error("phone must be non-empty string");
+  }
+
+  if (typeof file !== "string" || file.length === 0) {
+    throw new Error("file must be non-empty string");
+  }
+
+  if (!VIDEO_PLATFORMS.includes(String(platform) as (typeof VIDEO_PLATFORMS)[number])) {
+    throw new Error("platform must be one of: " + VIDEO_PLATFORMS.join(", "));
+  }
+
+  let sphLinkArgs: string[] = [];
+  if (String(platform) === "sph") {
+    if (sphProductId) {
+      sphLinkArgs = ["--sph-product-id", sphProductId];
+    } else if (sphDramaId) {
+      sphLinkArgs = ["--sph-drama-id", sphDramaId];
+    } else if (sphSeriesId) {
+      sphLinkArgs = ["--sph-series-id", sphSeriesId];
+    } else if (sphLink && typeof sphLink === "object") {
+      const link = sphLink as Record<string, unknown>;
+      const type = String(link.type || "");
+      const value = link.value == null ? "" : String(link.value).trim();
+      if (type === "product") {
+        if (!value) {
+          throw new Error(
+            "sphLink.value is required when sphLink.type=product"
+          );
+        }
+        sphLinkArgs = ["--sph-product-id", value];
+      } else if (type === "mini_drama" || type === "drama") {
+        if (!value) {
+          throw new Error(
+            "sphLink.value is required when sphLink.type=mini_drama"
+          );
+        }
+        sphLinkArgs = ["--sph-drama-id", value];
+      } else if (type === "sph_series" || type === "series") {
+        if (!value) {
+          throw new Error(
+            "sphLink.value is required when sphLink.type=sph_series"
+          );
+        }
+        sphLinkArgs = ["--sph-series-id", value];
+      } else if (value) {
+        // 兼容旧行为：未指定类型但给了编号时按商品处理
+        sphLinkArgs = ["--sph-product-id", value];
+      } else if (type) {
+        sphLinkArgs = ["--sph-link-type", type];
+      }
+    }
+  }
+
+  const cliArgs: string[] = [
+    "publish",
+    "-p",
+    String(platform),
+    "-f",
+    file,
+    "-t",
+    String(title),
+    // The CLI derives persist:<phone><平台中文名> itself, keeping every platform alias in sync.
+    "--phone",
+    phone,
+    ...(description ? ["--description", String(description)] : []),
+    ...(shortTitle ? ["--short-title", String(shortTitle)] : []),
+    ...(bt2 ? ["--bt2", String(bt2)] : []),
+    ...(tags ? ["--tags", String(tags)] : []),
+    ...(address ? ["--address", String(address)] : []),
+    ...(publishAt ? ["--publish-at", String(publishAt)] : []),
+    ...(show ? ["--show"] : []),
+    ...(draft ? ["--draft"] : []),
+    ...(creativeStatement ? ["--creative-statement", creativeStatement] : []),
+    ...(cover ? ["--cover", cover] : []),
+    ...sphLinkArgs,
+  ];
+
+  const result = await runCli(cliArgs, { onProgress });
+
+  if (result.exitCode === 0) {
+    const lastJson = result.lastJson;
+    if (
+      lastJson !== null &&
+      typeof lastJson === "object" &&
+      (lastJson as { scheduled?: unknown }).scheduled === true
+    ) {
+      return JSON.stringify({
+        status: "scheduled",
+        id: (lastJson as any).id,
+        publishAt: (lastJson as any).publishAt,
+        message: (lastJson as any).message,
+      });
+    }
+    return JSON.stringify({
+      status: (result.lastJson as any)?.resultStatus ?? "success",
+      publishMode: (result.lastJson as any)?.publishMode,
+      message: (result.lastJson as any)?.message ?? "上传成功",
+    });
+  }
+
+  if (result.exitCode === 4) {
+    return JSON.stringify({
+      status: "needs_attention",
+      publishMode: "draft",
+      outcome: (result.lastJson as any)?.outcome ?? "draft_saved",
+      needsAttention: true,
+      message:
+        (result.lastJson as any)?.message ?? "已转存草稿，请检查视频号链接",
+    });
+  }
+
+  if (result.exitCode === 3) {
+    throw new Error(
+      (result.lastJson as any)?.message ?? "发布失败(登录态异常)"
+    );
+  }
+
+  if (result.exitCode === 1) {
+    throw new Error("发布超时或失败: " + result.stderr.slice(0, 300));
+  }
+
+  if (result.exitCode === 2) {
+    throw new Error("参数错误: " + result.stderr.slice(0, 200));
+  }
+
+  throw new Error("未知错误 exit " + String(result.exitCode));
+}

@@ -1,0 +1,309 @@
+"use strict";
+
+const path = require("path");
+const fs = require("fs");
+const assert = require("assert");
+const { buildSync } = require("esbuild");
+
+const root = path.join(__dirname, "..");
+const outDir = path.join(root, "test/.cache");
+fs.mkdirSync(outDir, { recursive: true });
+
+const schedulerBundle = path.join(outDir, "scheduledPublish.cjs");
+const publishArgsBundle = path.join(outDir, "parsePublishArgs.cjs");
+
+buildSync({
+  entryPoints: [path.join(root, "src/main/services/scheduledPublish.js")],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  outfile: schedulerBundle,
+  external: [
+    "electron",
+    "puppeteer-core",
+    "puppeteer-extra",
+    "puppeteer-in-electron",
+    "puppeteer-extra-plugin-stealth",
+  ],
+});
+
+buildSync({
+  entryPoints: [path.join(root, "src/main/cli/parsePublishArgs.js")],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  outfile: publishArgsBundle,
+});
+
+const {
+  parsePublishAt,
+  createScheduledRecord,
+  isExpiredScheduledRecord,
+  buildTaskPayloadFromRecord,
+} = require(schedulerBundle);
+const { parsePublishArgs, publishHelpText } = require(publishArgsBundle);
+
+const fixedNow = new Date("2026-05-05T08:00:00+08:00").getTime();
+
+(() => {
+  const r = parsePublishAt("2026-05-05 20:30:00", fixedNow);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(new Date(r.value).getFullYear(), 2026);
+  assert.strictEqual(new Date(r.value).getMonth(), 4);
+  assert.strictEqual(new Date(r.value).getDate(), 5);
+})();
+
+(() => {
+  const r = parsePublishAt("2026/05/05 20:30", fixedNow);
+  assert.strictEqual(r.ok, false);
+})();
+
+(() => {
+  const r = parsePublishAt("2026-05-05 07:59:59", fixedNow);
+  assert.strictEqual(r.ok, false);
+  assert.ok(String(r.error).includes("未来"));
+})();
+
+(() => {
+  const base = {
+    bookName: "任务名",
+    textOtherName: "视频文本名",
+    textType: "local",
+    pt: "抖音",
+    selectedFile: "v.mp4",
+    bt: "标题",
+    bt2: "短标题",
+    bq: "#标签",
+    publishOptions: {
+      link: { enabled: true, type: "product", value: "10000591263144" },
+    },
+    address: "广州",
+    filePath: "/tmp/v.mp4",
+    useragent: "ua",
+    phone: "13800138000",
+    partition: "persist:13800138000抖音",
+    url: "https://example.com/list",
+    date: "2026-05-05",
+  };
+  const r = createScheduledRecord(base, "2026-05-05 20:30:00", fixedNow);
+  assert.strictEqual(r.publishStatus, "scheduled");
+  assert.strictEqual(r.lastPublishMessage, "等待定时发布");
+  assert.strictEqual(r.scheduledTask, true);
+  assert.strictEqual(r.bt, "标题");
+  assert.strictEqual(r.bq, "#标签");
+  assert.strictEqual(r.filePath, "/tmp/v.mp4");
+  assert.strictEqual(r.publishOptions.link.value, "10000591263144");
+  assert.ok(r.scheduledPublishAt > fixedNow);
+})();
+
+(() => {
+  const expired = {
+    publishStatus: "scheduled",
+    scheduledTask: true,
+    scheduledPublishAt: fixedNow - 1,
+  };
+  const pending = {
+    publishStatus: "scheduled",
+    scheduledTask: true,
+    scheduledPublishAt: fixedNow + 1,
+  };
+  assert.strictEqual(isExpiredScheduledRecord(expired, fixedNow), true);
+  assert.strictEqual(isExpiredScheduledRecord(pending, fixedNow), false);
+})();
+
+(() => {
+  const payload = buildTaskPayloadFromRecord({
+    id: "1",
+    taskId: "old",
+    bookName: "任务名",
+    textType: "local",
+    textOtherName: "视频文本名",
+    bt: "标题",
+    bt2: "短标题",
+    bq: "#标签",
+    address: "广州",
+    pt: "抖音",
+    url: "https://example.com/upload",
+    useragent: "ua",
+    partition: "persist:13800138000抖音",
+    filePath: "/tmp/v.mp4",
+    selectedFile: "v.mp4",
+    phone: "13800138000",
+    publishOptions: {
+      link: { enabled: true, type: "product", value: "10000591263144" },
+    },
+  });
+  assert.strictEqual(payload.bookName, "任务名");
+  assert.strictEqual(payload.data.bt1, "标题");
+  assert.strictEqual(payload.data.textOtherName, "视频文本名");
+  assert.strictEqual(payload.pt, "抖音");
+  assert.strictEqual(payload.publishOptions.link.value, "10000591263144");
+  assert.notStrictEqual(payload.taskId, "old");
+})();
+
+(() => {
+  const payload = buildTaskPayloadFromRecord({
+    textType: "local",
+    pt: "视频号",
+    bt: "标题",
+    description: "简介",
+    shortTitle: "六个字短标题",
+    tags: ["旅行", "日常"],
+    filePath: "/tmp/v.mp4",
+  });
+  assert.strictEqual(payload.data.title, "标题");
+  assert.strictEqual(payload.data.description, "简介");
+  assert.strictEqual(payload.data.shortTitle, "六个字短标题");
+  assert.deepStrictEqual(payload.data.tags, ["旅行", "日常"]);
+  assert.strictEqual(payload.data.bt1, "标题");
+  assert.strictEqual(payload.data.bt2, "简介");
+  assert.strictEqual(payload.data.bt2Filled, "六个字短标题");
+  assert.strictEqual(payload.data.bq, "旅行 日常");
+})();
+
+(() => {
+  const payload = buildTaskPayloadFromRecord({
+    textType: "local",
+    pt: "视频号",
+    bt: "标题",
+    bt2: "旧短标题",
+    filePath: "/tmp/v.mp4",
+  });
+  assert.strictEqual(
+    payload.data.shortTitle,
+    "旧短标题",
+    "旧视频号记录 bt2 与标题不同时应恢复为短标题"
+  );
+})();
+
+(() => {
+  const payload = buildTaskPayloadFromRecord({
+    textType: "local",
+    pt: "视频号",
+    bt: "标题",
+    bt2: "标题",
+    filePath: "/tmp/v.mp4",
+  });
+  assert.strictEqual(
+    payload.data.shortTitle,
+    "",
+    "旧视频号记录 bt2 等于标题时应视为标题回退"
+  );
+})();
+
+(() => {
+  const scheduled = createScheduledRecord(
+    {
+      textType: "local",
+      pt: "视频号",
+      bt: "标题",
+      description: "视频号简介",
+      shortTitle: "",
+      bt2: "视频号简介",
+      bt2Filled: "",
+      filePath: "/tmp/v.mp4",
+    },
+    "2026-05-05 20:30:00",
+    fixedNow
+  );
+  const payload = buildTaskPayloadFromRecord(scheduled);
+  assert.strictEqual(payload.data.description, "视频号简介");
+  assert.strictEqual(
+    payload.data.shortTitle,
+    "",
+    "定时记录往返后应保留显式空短标题"
+  );
+})();
+
+(() => {
+  // 定时视频发布必须透传封面（dy/ks/sph 读 data.data.coverPath）
+  const payload = buildTaskPayloadFromRecord({
+    textType: "local",
+    pt: "抖音",
+    bt: "标题",
+    description: "简介",
+    tags: ["解字", "亳州"],
+    filePath: "/tmp/v.mp4",
+    coverPath: "/tmp/封面_亳_3x4.png",
+  });
+  assert.strictEqual(
+    payload.data.coverPath,
+    "/tmp/封面_亳_3x4.png",
+    "视频定时任务 payload 应携带记录里的 coverPath"
+  );
+
+  const scheduled = createScheduledRecord(
+    {
+      textType: "local",
+      pt: "快手",
+      bt: "标题",
+      description: "简介",
+      tags: ["解字"],
+      filePath: "/tmp/v.mp4",
+      coverPath: "/tmp/封面_3x4.png",
+    },
+    "2026-05-05 20:30:00",
+    fixedNow
+  );
+  assert.strictEqual(
+    buildTaskPayloadFromRecord(scheduled).data.coverPath,
+    "/tmp/封面_3x4.png",
+    "定时记录往返后封面不丢"
+  );
+
+  const noCover = buildTaskPayloadFromRecord({
+    textType: "local",
+    pt: "抖音",
+    bt: "标题",
+    filePath: "/tmp/v.mp4",
+  });
+  assert.strictEqual(
+    noCover.data.coverPath,
+    "",
+    "无封面记录应得空串（上传脚本按 falsy 跳过封面步骤）"
+  );
+})();
+
+(() => {
+  const r = parsePublishArgs([
+    "-p",
+    "dy",
+    "--phone",
+    "13800138000",
+    "-f",
+    "./v.mp4",
+    "-t",
+    "标题",
+    "--publish-at",
+    "2026-05-05 20:30:00",
+  ]);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.value.publishAt, "2026-05-05 20:30:00");
+})();
+
+(() => {
+  const r = parsePublishArgs([
+    "-p",
+    "xhs",
+    "--phone",
+    "13800138000",
+    "-f",
+    "./v.mp4",
+    "-t",
+    "标题",
+    "--bt2",
+    "正文",
+    "--tags",
+    "减脂 健身",
+  ]);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.value.platform, "小红书");
+  assert.strictEqual(r.value.partition, "persist:13800138000小红书");
+  assert.strictEqual(r.value.bq, "减脂 健身");
+})();
+
+(() => {
+  assert.ok(publishHelpText().includes("--publish-at"));
+})();
+
+console.log("test:scheduled-publish 全部通过");

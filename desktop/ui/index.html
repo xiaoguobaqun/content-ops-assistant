@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' app-media: data:; media-src app-media:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'">
+  <title>内容运营助手</title><link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <aside class="sidebar">
+    <div class="window-grip"></div>
+    <div class="brand"><span class="brand-mark"><svg viewBox="0 0 28 28" aria-hidden="true"><path d="M7 7h10v14H7zM12 3h10v14"/><path d="m11 12 4 3-4 3z"/></svg></span><div><strong>内容运营助手</strong><span>让发布更有条理</span></div></div>
+    <nav aria-label="主要导航">
+      <button class="nav-item active" data-view="workspace"><svg><use href="icons.svg#workspace"/></svg><span>发布工作台</span></button>
+      <button class="nav-item" data-view="tasks"><svg><use href="icons.svg#layers"/></svg><span>任务记录</span><b id="task-count">0</b></button>
+      <button class="nav-item" data-view="accounts"><svg><use href="icons.svg#users"/></svg><span>账号管理</span></button>
+      <button class="nav-item" data-view="system"><svg><use href="icons.svg#settings"/></svg><span>系统状态</span></button>
+    </nav>
+    <div class="sidebar-tip"><svg><use href="icons.svg#shield"/></svg><p>先存草稿，放心检查<span>确认内容后，再选择发布。</span></p></div>
+    <footer class="sidebar-footer"><span id="service-indicator" class="status-dot"></span><span id="service-label">本机工作区</span><small>v0.3.2</small></footer>
+  </aside>
+  <div class="app-shell">
+    <div class="titlebar"><span>我的内容工作区</span><span class="titlebar-right">抖音 · 视频号 · 小红书</span></div>
+    <header class="page-header"><div><h1 id="page-title">发布工作台</h1><p id="page-description">准备好内容，把剩下的步骤交给工作流。</p></div><div class="header-actions"><button id="account-status" class="connection" data-view="accounts"><span class="status-dot"></span><span>正在读取账号</span></button><button class="button button-quiet" id="refresh-button"><svg><use href="icons.svg#refresh"/></svg>刷新连接</button></div></header>
+    <section id="activity-region" class="activity-region" aria-live="polite"></section>
+    <main id="main" tabindex="-1"></main>
+  </div>
+  <div class="toast-stack" id="toasts" role="status" aria-live="polite"></div>
+  <dialog id="task-dialog" class="task-dialog" aria-labelledby="task-dialog-title"></dialog>
+  <script type="module" src="app.mjs"></script>
+</body></html>

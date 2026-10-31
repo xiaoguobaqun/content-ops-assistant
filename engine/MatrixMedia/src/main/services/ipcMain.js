@@ -1,0 +1,1018 @@
+import {
+  ipcMain,
+  dialog,
+  BrowserWindow,
+  app as electronApp,
+  shell,
+  safeStorage,
+} from "electron";
+import { spawn } from "child_process";
+import Server from "../server/index";
+
+import { winURL } from "../config/StaticPath";
+import downloadFile from "./downloadFile";
+import { createPublishHistoryExportHandler } from "./publishHistoryExport.js";
+import { registerPuppeteerIpc } from "./puppeteerFile";
+import { registerScheduledPublishIpc } from "./scheduledPublish";
+import { registerSphWindowProductsIpc } from "./sphWindowProducts";
+import { registerSphEntityOptionsIpc } from "./sphEntityOptions";
+import { createLaunchInstallerHandler } from "./launchInstaller";
+import { pickReleaseInstaller } from "./pickReleaseInstaller";
+import { applyAccountProxyForTask } from "./proxyConfig";
+import { SERVER_REQUEST_TOKEN } from "../server/requestGuard";
+import { registerTelemetryPreferenceIpc } from "./telemetryPreferenceIpc.js";
+import { registerAiContentIpc } from "./aiContentIpc.js";
+import { createAiKeyStore } from "./aiKeyStore.js";
+import { registerDataStatsIpc } from "./dataStats/index.js";
+import { runSphChromeLogin } from "./cliLogin/sphChromeLogin.js";
+import { prepareSphAccountLoginSession } from "./sphLoginSession.js";
+import {
+  closeOtherAccountLoginWindows,
+  getAccountLoginWindowByPartition,
+  registerAccountLoginWindow,
+} from "./accountLoginWindowManager";
+
+const https = require("https");
+const version = require("../../../package.json").version;
+console.log(version, "-------");
+import fs from "fs";
+import path from "path";
+import xlsx from "xlsx";
+// 获取托管在 Gitee 的 pubtw 仓库 Release 信息。
+// 公开仓库可匿名调用 API，无需 access_token，避免把可写 token 打进开源客户端。
+function requestGiteeJson(path, fallback) {
+  return new Promise((resolve) => {
+    const options = {
+      hostname: "gitee.com",
+      path,
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "matrix-video",
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = "";
+
+      res.on("data", (chunk) => {
+        data += chunk;
+      });
+
+      res.on("end", () => {
+        if (res.statusCode !== 200) {
+          console.warn(`Gitee API ${path} 返回 ${res.statusCode}，跳过解析`);
+          resolve(fallback);
+          return;
+        }
+        try {
+          resolve(JSON.parse(data));
+        } catch (error) {
+          console.warn("Gitee 响应非 JSON，跳过:", data.slice(0, 80));
+          resolve(fallback);
+        }
+      });
+    });
+
+    req.on("error", (error) => {
+      console.error("Error fetching releases:", error);
+      resolve(fallback);
+    });
+
+    req.end();
+  });
+}
+
+// Cache Gitee release result for 1 hour to avoid rate-limit (403) on repeated calls
+let _releaseCache = null;
+let _releaseCacheAt = 0;
+const RELEASE_CACHE_TTL_MS = 60 * 60 * 1000;
+
+async function getLatestRelease() {
+  if (
+    _releaseCache !== null &&
+    Date.now() - _releaseCacheAt < RELEASE_CACHE_TTL_MS
+  ) {
+    return _releaseCache;
+  }
+  const latest = await requestGiteeJson(
+    "/api/v5/repos/gzlingyi_0/pubtw/releases/latest",
+    null
+  );
+  if (latest && latest.id) {
+    _releaseCache = latest;
+    _releaseCacheAt = Date.now();
+    return latest;
+  }
+
+  const list = await requestGiteeJson(
+    "/api/v5/repos/gzlingyi_0/pubtw/releases?page=1&per_page=20&direction=desc",
+    []
+  );
+  const result = Array.isArray(list) && list.length > 0 ? list[0] : null;
+  if (result) {
+    _releaseCache = result;
+    _releaseCacheAt = Date.now();
+  }
+  return result;
+}
+
+/** 解析 v0.9.7 / 0.9.7 为可比较的数字（按段比较，避免 0.9.10 与 parseInt 拼接错误） */
+function compareSemver(remoteRaw, localRaw) {
+  const norm = (s) =>
+    String(s || "")
+      .replace(/^v/i, "")
+      .trim()
+      .split(".")
+      .map((x) => parseInt(x, 10) || 0);
+  const a = norm(remoteRaw);
+  const b = norm(localRaw);
+  const len = Math.max(a.length, b.length, 3);
+  for (let i = 0; i < len; i++) {
+    const da = a[i] || 0;
+    const db = b[i] || 0;
+    if (da !== db) {
+      return da > db ? 1 : -1;
+    }
+  }
+  return 0;
+}
+
+export default {
+  async Mainfunc(IsUseSysTitle) {
+    // 内置服务（localhost:30088）的随机令牌，只发放给自家页面：
+    // 打包后主窗口是 file://，dev 模式是 http://localhost:xxxx；
+    // 账号登录窗等加载的外部平台页面一律拒绝，防止令牌外泄。
+    ipcMain.handle("matrix:server-token", (event) => {
+      try {
+        const frameUrl = String(
+          (event.senderFrame && event.senderFrame.url) || ""
+        );
+        if (/^(file:|https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?[\/#?]?)/.test(frameUrl)) {
+          return SERVER_REQUEST_TOKEN;
+        }
+      } catch (_) {
+        /* ignore */
+      }
+      return "";
+    });
+
+    registerTelemetryPreferenceIpc(ipcMain);
+
+    // AI 生成标题 / 正文 / 标签：Key 加密存在 userData，请求只在主进程发出
+    registerAiContentIpc(ipcMain, {
+      store: createAiKeyStore({
+        filePath: path.join(electronApp.getPath("userData"), "ai-settings.json"),
+        safeStorage,
+      }),
+    });
+
+    // 检查更新：只做「是否有新版本」的检测并返回版本信息，
+    // 不再自动开始下载 —— 是否下载由用户点击「立即更新」后
+    // 通过 start-update-download 显式触发（非强制更新）。
+    ipcMain.handle("check-for-updates", async (_event) => {
+      const lastData = await getLatestRelease();
+      if (!lastData) {
+        return { hasUpdate: false };
+      }
+      const remoteVer =
+        (lastData.tag_name && String(lastData.tag_name).replace(/^v/i, "")) ||
+        (lastData.name && String(lastData.name).replace(/^v/i, ""));
+      const cmp = compareSemver(remoteVer, version);
+      const assets = lastData.assets || [];
+
+      const installer = pickReleaseInstaller(assets, {
+        translated: Boolean(electronApp.runningUnderARM64Translation),
+      });
+      const downloadURL = installer && installer.browser_download_url;
+
+      return {
+        hasUpdate: Boolean(downloadURL && cmp > 0),
+        currentVersion: version,
+        latestVersion: remoteVer || "",
+        releaseName: lastData.name || lastData.tag_name || "",
+        releaseBody: lastData.body || "",
+      };
+    });
+
+    // 用户确认后开始下载安装包。下载地址不信任渲染进程传参，
+    // 由主进程重新解析一次 Release（1 小时缓存），避免被篡改。
+    ipcMain.handle("start-update-download", async (event) => {
+      try {
+        const lastData = await getLatestRelease();
+        if (!lastData) {
+          return { ok: false, message: "未获取到版本信息，请检查网络" };
+        }
+        const installer = pickReleaseInstaller(lastData.assets || [], {
+          translated: Boolean(electronApp.runningUnderARM64Translation),
+        });
+        const downloadURL = installer && installer.browser_download_url;
+        if (!downloadURL) {
+          return { ok: false, message: "未找到适合当前平台的安装包" };
+        }
+        const win = BrowserWindow.fromWebContents(event.sender);
+        if (!win) {
+          return { ok: false, message: "主窗口已关闭，无法下载" };
+        }
+        downloadFile.download(win, downloadURL);
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, message: (e && e.message) || "启动下载失败" };
+      }
+    });
+
+    // 先启动安装包再退出应用，避免安装器处理正在运行的主程序时失败。
+    ipcMain.handle(
+      "launch-installer",
+      createLaunchInstallerHandler({
+        platform: process.platform,
+        spawn,
+        shell,
+        electronApp,
+      })
+    );
+
+    ipcMain.handle("publish:export-history", createPublishHistoryExportHandler({
+      dialog, BrowserWindow, app: electronApp,
+    }));
+
+    // puppeteerFile 上传文件发布，获取登录状态
+    registerPuppeteerIpc();
+    registerScheduledPublishIpc();
+    registerSphWindowProductsIpc(ipcMain);
+    registerSphEntityOptionsIpc(ipcMain);
+    // 数据统计：采集（页面上下文 fetch）+ 本地快照读取
+    registerDataStatsIpc();
+
+    // 通用的渲染进程 → 主进程日志透传通道，方便把 webview / Vue 里
+    // 不开 DevTools 就看不到的输出，直接打到「主程序日志」那个终端面板。
+    // 用法：ipcRenderer.send('mm-debug-log', { tag: 'xxx', payload: any })
+    ipcMain.on("mm-debug-log", (_event, args) => {
+      try {
+        const tag = (args && args.tag) || "debug";
+        const payload =
+          args && Object.prototype.hasOwnProperty.call(args, "payload")
+            ? args.payload
+            : args;
+        console.log(`[mm-debug-log][${tag}]`, payload);
+      } catch (e) {
+        console.log("[mm-debug-log] 打印失败:", e && e.message);
+      }
+    });
+
+    // 账号登录用的独立 BrowserWindow：替代 <webview>，避免小红书等站点
+    // 通过 GuestView 指纹 (websectiga / sec_poison_id / window.parent 等) 把会话标红。
+    // partition 与视频管理的发布窗口完全一致 (persist:xxx<平台>)，cookie/localStorage
+    // 在同一份 Electron session 里共享 —— 在这里扫码登录后，发布流程能直接复用。
+    //
+    // 互斥策略：同一时间只允许有一个'账号登录窗'。每次调用都会关掉其它
+    // partition 的旧登录窗，避免用户切账号时桌面上堆一排登录窗口。
+    ipcMain.handle("open-sph-chrome-login", async (_event, args) => {
+      const partition = String((args && args.partition) || "");
+      const existingWin = getAccountLoginWindowByPartition(partition);
+      if (existingWin) existingWin.close();
+      return runSphChromeLogin({ partition, phone: args && args.phone });
+    });
+
+    ipcMain.handle("open-account-login-window", async (_event, args) => {
+      const partition = args && args.partition;
+      const url = args && args.url;
+      const useragent = args && args.useragent;
+      const title = args && args.title;
+      if (!partition || !url) {
+        return { ok: false, message: "partition/url 必填" };
+      }
+
+      let refreshedSession = false;
+      try {
+        if (args.pt === "视频号") {
+          refreshedSession = (await prepareSphAccountLoginSession({ partition, phone: args.phone })).changed;
+        } else {
+          await applyAccountProxyForTask({ partition, phone: args.phone, pt: args.pt });
+        }
+      } catch (proxyErr) {
+        console.warn(
+          "[open-account-login-window] 登录准备失败:",
+          proxyErr && proxyErr.message
+        );
+        return {
+          ok: false,
+          message: (proxyErr && proxyErr.message) || "登录准备失败",
+        };
+      }
+
+      // 先处理现有账号登录窗：
+      //   - 同 partition：标记为'已存在'，等会儿 focus 复用
+      //   - 不同 partition：直接关掉，避免用户切账号时桌面上堆一排登录窗口
+      closeOtherAccountLoginWindows(partition);
+      const existingWin = getAccountLoginWindowByPartition(partition);
+
+      if (existingWin) {
+        try {
+          if (refreshedSession) await existingWin.loadURL(url);
+          if (existingWin.isMinimized()) existingWin.restore();
+          existingWin.focus();
+        } catch (_) {
+          /* ignore */
+        }
+        return { ok: true, reused: true };
+      }
+
+      const win = new BrowserWindow({
+        width: 1200,
+        height: 800,
+        title: `${title || "账号登录"} ${partition}`,
+        autoHideMenuBar: true,
+        webPreferences: {
+          partition,
+          nodeIntegration: false,
+          contextIsolation: true,
+          webviewTag: false,
+          devTools: true,
+        },
+      });
+      registerAccountLoginWindow(win, partition);
+
+      // 跟视频管理的发布窗口保持一致：强制设置 UA 为 ptConfig[平台].useragent，
+      // 不要让站点看到 Electron/x.x.x 字样；扫码登录时种下的 cookie 自然就是
+      // 跟发布时同一份 UA 指纹下的。
+      if (useragent) {
+        try {
+          win.webContents.setUserAgent(useragent);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+
+      // 弹窗页打不开（站点的二维码扫码经常会弹新页），统一拒绝 window.open，
+      // 让站点退回到内嵌扫码 / 当前页跳转，避免漏跑事件监听。
+      try {
+        win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      } catch (_) {
+        /* ignore */
+      }
+
+      try {
+        await win.loadURL(url);
+      } catch (e) {
+        console.warn(
+          "[open-account-login-window] loadURL 失败:",
+          e && e.message
+        );
+      }
+      return { ok: true };
+    });
+
+    // 通用的弹独立 BrowserWindow 加载任意 URL（不绑定 partition），用于
+    // 反馈问卷这种"不需要登录态共享"的场景，统一替代 <webview>。
+    ipcMain.handle("open-external-window", async (_event, args) => {
+      const url = args && args.url;
+      if (!url) return { ok: false, message: "url 必填" };
+      const win = new BrowserWindow({
+        width: (args && args.width) || 1000,
+        height: (args && args.height) || 720,
+        title: (args && args.title) || "",
+        autoHideMenuBar: true,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+          webviewTag: false,
+          devTools: true,
+        },
+      });
+      try {
+        win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        await win.loadURL(url);
+      } catch (e) {
+        console.warn("[open-external-window] loadURL 失败:", e && e.message);
+      }
+      return { ok: true };
+    });
+
+    // 获取文件下面的文件
+    ipcMain.handle("getFiles", (event, args) => {
+      if (!fs.existsSync(args)) {
+        return [];
+      }
+      console.log(args, "getFiles");
+      return fs.readdirSync(args);
+    });
+    ipcMain.handle("IsUseSysTitle", async () => {
+      return IsUseSysTitle;
+    });
+    ipcMain.handle("windows-mini", (event, args) => {
+      BrowserWindow.fromWebContents(event.sender)?.minimize();
+    });
+    ipcMain.handle("window-max", async (event, args) => {
+      if (BrowserWindow.fromWebContents(event.sender)?.isMaximized()) {
+        BrowserWindow.fromWebContents(event.sender)?.unmaximize();
+        return { status: false };
+      } else {
+        BrowserWindow.fromWebContents(event.sender)?.maximize();
+        return { status: true };
+      }
+    });
+
+    ipcMain.handle("window-close", (event, args) => {
+      BrowserWindow.fromWebContents(event.sender)?.close();
+    });
+    ipcMain.handle("start-download", (event, msg) => {
+      downloadFile.download(
+        BrowserWindow.fromWebContents(event.sender),
+        msg.downloadUrL
+      );
+    });
+
+    ipcMain.handle("reset-app", () => {
+      electronApp.relaunch();
+      electronApp.exit();
+    });
+    ipcMain.handle("open-messagebox", async (event, arg) => {
+      const res = await dialog.showMessageBox(
+        BrowserWindow.fromWebContents(event.sender),
+        {
+          type: arg.type || "info",
+          title: arg.title || "",
+          buttons: arg.buttons || [],
+          message: arg.message || "",
+          noLink: arg.noLink || true,
+        }
+      );
+      return res;
+    });
+    ipcMain.handle("open-errorbox", (event, arg) => {
+      dialog.showErrorBox(arg.title, arg.message);
+    });
+
+    // 选择目录的函数
+    ipcMain.handle("dialog:openDirectory", async (event) => {
+      const result = await dialog.showOpenDialog(
+        BrowserWindow.fromWebContents(event.sender),
+        {
+          properties: ["openDirectory"], // 选择目录
+        }
+      );
+      return result.filePaths[0]; // 返回选中的目录路径
+    });
+
+    ipcMain.handle("fs:existsSync", async (_event, filePath) => {
+      try {
+        return fs.existsSync(filePath);
+      } catch (_) {
+        return false;
+      }
+    });
+
+    // 发布失败截图：读取为 data URL 展示，或直接打到系统看图程序里打开。
+    // 打包后页面是 file://，<img src="C:\..."> 在 Windows 上有盘符/中文转义坑，
+    // 所以统一由主进程读文件转 base64。
+    ipcMain.handle("publish:readFailScreenshot", async (_event, filePath) => {
+      const { readFailScreenshotDataUrl } = await import(
+        "./upLoad/failureScreenshot.js"
+      );
+      return readFailScreenshotDataUrl(filePath);
+    });
+
+    ipcMain.handle("publish:openFailScreenshot", async (_event, filePath) => {
+      const target = String(filePath || "");
+      if (!target || !fs.existsSync(target)) return false;
+      // openPath 用系统默认看图程序打开，方便用户另存或附到反馈里
+      const error = await shell.openPath(target);
+      if (error) {
+        console.warn("打开失败截图失败:", error);
+        return false;
+      }
+      return true;
+    });
+
+    ipcMain.handle("publish:downloadRemoteFile", async (_event, remoteUrl) => {
+      const { resolvePublishFile } = await import("./resolvePublishFile.js");
+      const resolved = await resolvePublishFile(remoteUrl);
+      // 不调用 cleanup，文件留给重新发布使用
+      return resolved.localPath;
+    });
+
+    // ── Chrome 浏览器路径配置 ──────────────────────────────────
+    ipcMain.handle("chrome:getPath", async () => {
+      const { getConfiguredChromePath, getChromeDisplayName } = await import(
+        "./chromeConfig.js"
+      );
+      const chromePath = getConfiguredChromePath();
+      return {
+        path: chromePath,
+        displayName: getChromeDisplayName(chromePath),
+      };
+    });
+
+    ipcMain.handle("chrome:setPath", async (_event, chromePath) => {
+      const { setConfiguredChromePath, getChromeDisplayName } = await import(
+        "./chromeConfig.js"
+      );
+      setConfiguredChromePath(chromePath);
+      return {
+        path: chromePath,
+        displayName: getChromeDisplayName(chromePath),
+      };
+    });
+
+    ipcMain.handle("chrome:autoDetect", async () => {
+      const { autoDetectChromePath, getChromeDisplayName } = await import(
+        "./chromeConfig.js"
+      );
+      const detected = autoDetectChromePath() || "";
+      return { path: detected, displayName: getChromeDisplayName(detected) };
+    });
+
+    ipcMain.handle("chrome:test", async (_event, chromePath) => {
+      const { testChromePath } = await import("./chromeConfig.js");
+      return await testChromePath(chromePath);
+    });
+
+    ipcMain.handle("chrome:browse", async (event) => {
+      const isMac = process.platform === "darwin";
+      const result = await dialog.showOpenDialog(
+        BrowserWindow.fromWebContents(event.sender),
+        {
+          title: isMac ? "选择 Chrome 浏览器" : "选择 Chrome 浏览器可执行文件",
+          // macOS 选 .app 目录；Windows/Linux 选可执行文件
+          properties: isMac
+            ? ["openFile", "treatPackageAsDirectory"]
+            : ["openFile"],
+          filters: isMac
+            ? [{ name: "应用程序", extensions: ["app"] }]
+            : process.platform === "win32"
+            ? [{ name: "可执行文件", extensions: ["exe"] }]
+            : [],
+          defaultPath: isMac ? "/Applications" : undefined,
+        }
+      );
+      if (result.canceled || !result.filePaths.length) return null;
+      let selected = result.filePaths[0];
+      // macOS: 用户选了 .app 包，自动解析出内部可执行文件路径
+      if (isMac && selected.endsWith(".app")) {
+        const { resolveAppBundleExecutable, getChromeDisplayName } =
+          await import("./chromeConfig.js");
+        const resolved = resolveAppBundleExecutable(selected);
+        if (resolved)
+          return {
+            path: resolved,
+            displayName: getChromeDisplayName(resolved),
+          };
+        return {
+          path: selected,
+          displayName: path.basename(selected, ".app"),
+          error: "无法解析该应用的可执行文件",
+        };
+      }
+      const { getChromeDisplayName } = await import("./chromeConfig.js");
+      return { path: selected, displayName: getChromeDisplayName(selected) };
+    });
+
+    // 小红书 + 真实浏览器模式：用 puppeteer-core 启动本机 Chrome 打开登录页
+    // 与发布流程共享同一个 chrome-xhs-profile userDataDir，登录态自动复用
+    let _xhsRealChromeLoginBrowser = null;
+    ipcMain.handle("open-xhs-real-chrome-login", async (_event, args) => {
+      const url = args && args.url;
+      if (!url) return { ok: false, message: "url 必填" };
+
+      // 如果已有打开的 Chrome 实例，尝试 focus
+      if (_xhsRealChromeLoginBrowser) {
+        try {
+          const pages = await _xhsRealChromeLoginBrowser.pages();
+          if (pages && pages.length > 0) {
+            await pages[0].bringToFront();
+            return { ok: true, reused: true };
+          }
+        } catch (_) {
+          // 连接已断开，清理引用
+          _xhsRealChromeLoginBrowser = null;
+        }
+      }
+
+      try {
+        const { resolveChromePath } = await import("./chromeConfig.js");
+        const chromePath = resolveChromePath();
+        if (!chromePath) {
+          return {
+            ok: false,
+            message: "未找到 Chrome 浏览器，请先在发布设置中配置 Chrome 路径",
+          };
+        }
+
+        const path = await import("path");
+        const chromeDataDir = path.default.join(
+          electronApp.getPath("userData"),
+          "chrome-xhs-profile"
+        );
+
+        const puppeteerCore = (await import("puppeteer-core")).default;
+        const { addExtra } = await import("puppeteer-extra");
+        const puppeteer = addExtra(puppeteerCore);
+
+        const browser = await puppeteer.launch({
+          executablePath: chromePath,
+          headless: false,
+          userDataDir: chromeDataDir,
+          ignoreDefaultArgs: ["--enable-automation"],
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--no-first-run",
+            "--no-default-browser-check",
+          ],
+          defaultViewport: null,
+        });
+
+        _xhsRealChromeLoginBrowser = browser;
+
+        // 浏览器关闭时清理引用
+        browser.on("disconnected", () => {
+          if (_xhsRealChromeLoginBrowser === browser) {
+            _xhsRealChromeLoginBrowser = null;
+          }
+        });
+
+        const page = (await browser.pages())[0] || (await browser.newPage());
+
+        // 注入反自动化检测
+        await page.evaluateOnNewDocument(() => {
+          Object.defineProperty(navigator, "webdriver", { get: () => false });
+          if (!window.chrome) window.chrome = {};
+          window.chrome.runtime = window.chrome.runtime || {};
+        });
+
+        await page.goto(url, {
+          waitUntil: "domcontentloaded",
+          timeout: 60000,
+        });
+
+        // 只断开 puppeteer 连接，Chrome 窗口保留给用户操作
+        browser.disconnect();
+        _xhsRealChromeLoginBrowser = null;
+
+        return { ok: true };
+      } catch (err) {
+        _xhsRealChromeLoginBrowser = null;
+        console.error("[xhs-chrome-login] 启动失败:", err?.message || err);
+        return {
+          ok: false,
+          message: "启动真实浏览器失败: " + (err?.message || err),
+        };
+      }
+    });
+
+    ipcMain.handle("dialog:openVideoFile", async (event) => {
+      const result = await dialog.showOpenDialog(
+        BrowserWindow.fromWebContents(event.sender),
+        {
+          properties: ["openFile"],
+          filters: [
+            {
+              name: "Video",
+              extensions: ["mp4", "mov", "mkv", "avi", "webm", "m4v"],
+            },
+          ],
+        }
+      );
+      if (
+        result.canceled ||
+        !result.filePaths ||
+        result.filePaths.length === 0
+      ) {
+        return undefined;
+      }
+      return result.filePaths[0];
+    });
+
+    ipcMain.handle("dialog:openArticleFile", async (event) => {
+      const result = await dialog.showOpenDialog(
+        BrowserWindow.fromWebContents(event.sender),
+        {
+          properties: ["openFile"],
+          filters: [
+            {
+              name: "Article",
+              extensions: ["md", "txt"],
+            },
+          ],
+        }
+      );
+      if (
+        result.canceled ||
+        !result.filePaths ||
+        result.filePaths.length === 0
+      ) {
+        return undefined;
+      }
+      return result.filePaths[0];
+    });
+
+    ipcMain.handle("dialog:openImageFile", async (event) => {
+      const result = await dialog.showOpenDialog(
+        BrowserWindow.fromWebContents(event.sender),
+        {
+          properties: ["openFile"],
+          filters: [
+            {
+              name: "Image",
+              extensions: ["jpg", "jpeg", "png", "webp"],
+            },
+          ],
+        }
+      );
+      if (
+        result.canceled ||
+        !result.filePaths ||
+        result.filePaths.length === 0
+      ) {
+        return undefined;
+      }
+      return result.filePaths[0];
+    });
+
+    ipcMain.handle("dialog:openBatchDir", async (event) => {
+      const result = await dialog.showOpenDialog(
+        BrowserWindow.fromWebContents(event.sender),
+        { properties: ["openDirectory"] }
+      );
+      if (result.canceled || !result.filePaths || result.filePaths.length === 0)
+        return null;
+      return result.filePaths[0];
+    });
+
+    ipcMain.handle("dialog:openBatchXlsx", async (event) => {
+      const result = await dialog.showOpenDialog(
+        BrowserWindow.fromWebContents(event.sender),
+        {
+          properties: ["openFile"],
+          filters: [{ name: "Excel", extensions: ["xlsx", "xls"] }],
+        }
+      );
+      if (result.canceled || !result.filePaths || result.filePaths.length === 0)
+        return null;
+      const filePath = result.filePaths[0];
+      try {
+        const workbook = xlsx.readFile(filePath);
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const rows = xlsx.utils.sheet_to_json(sheet, { defval: "" });
+        // 清洗 xlsx 单元格：去 BOM / 零宽 / NBSP / 换行 / 前后空白。
+        // trim() 处理不了 ﻿ / ​ /  ，这些是从网页复制单元格最常踩的坑。
+        const cleanCell = (v) =>
+          String(v || "")
+            .replace(/[﻿​‌‍ ]/g, "")
+            .replace(/[\r\n\t]/g, "")
+            .trim();
+        // Normalize: support Chinese and semantic English column headers.
+        // 列头本身也可能带不可见字符，做一份归一化映射。
+        const normalizedRows = rows
+          .map((row) => {
+            const map = {};
+            Object.keys(row).forEach((k) => {
+              const key = cleanCell(k).toLowerCase();
+              map[key] = row[k];
+            });
+            return {
+              fileName: cleanCell(
+                map["文件名"] != null
+                  ? map["文件名"]
+                  : map["filename"] != null
+                  ? map["filename"]
+                  : map["file"] || ""
+              ),
+              title: cleanCell(
+                map["标题"] != null ? map["标题"] : map["title"] || ""
+              ),
+              description: cleanCell(
+                map["简介"] != null
+                  ? map["简介"]
+                  : map["description"] != null
+                  ? map["description"]
+                  : ""
+              ),
+              shortTitle: cleanCell(
+                map["视频号短标题"] != null
+                  ? map["视频号短标题"]
+                  : map["shorttitle"] != null
+                  ? map["shorttitle"]
+                  : ""
+              ),
+              tags: cleanCell(
+                map["标签"] != null ? map["标签"] : map["tags"] || ""
+              ),
+            };
+          })
+          .filter((r) => r.fileName);
+        return normalizedRows;
+      } catch (e) {
+        return { error: e && e.message ? e.message : String(e) };
+      }
+    });
+
+    // 校验 + 解析批量发布的真实文件路径：
+    // - 拼 dirPath + fileName
+    // - 如果 fileName 没带后缀（或后缀对不上磁盘大小写），自动在目录里找匹配
+    // - 返回每条 { fileName, resolvedPath, exists, matchedFileName }
+    ipcMain.handle("resolveBatchFiles", async (event, payload) => {
+      try {
+        const dirPath = payload && payload.dirPath;
+        const fileNames = (payload && payload.fileNames) || [];
+        if (!dirPath) return { error: "缺少目录路径" };
+        if (!fs.existsSync(dirPath)) return { error: "目录不存在: " + dirPath };
+        const dirEntries = fs.readdirSync(dirPath);
+        // 建立 normalize 后的索引：忽略大小写 + 去不可见字符 -> 实际文件名
+        const norm = (s) =>
+          String(s || "")
+            .replace(/[﻿​‌‍ ]/g, "")
+            .replace(/[\r\n\t]/g, "")
+            .trim()
+            .toLowerCase();
+        const indexByName = new Map(); // 全名（含扩展名）
+        const indexByStem = new Map(); // 仅文件名主干（不含扩展名）
+        dirEntries.forEach((entry) => {
+          indexByName.set(norm(entry), entry);
+          const stem = entry.replace(/\.[^/.]+$/, "");
+          if (!indexByStem.has(norm(stem))) {
+            indexByStem.set(norm(stem), entry);
+          }
+        });
+        const results = fileNames.map((rawName) => {
+          const fileName = norm(rawName);
+          let matched = null;
+          if (indexByName.has(fileName)) {
+            matched = indexByName.get(fileName);
+          } else if (indexByStem.has(fileName)) {
+            // 用户在 xlsx 里只写了文件名主干，自动补磁盘上的真实后缀
+            matched = indexByStem.get(fileName);
+          } else {
+            // 退一步：xlsx 里写了 stem.mp4 但磁盘是 stem.MP4 / stem.mov 之类
+            const stem = norm(String(rawName).replace(/\.[^/.]+$/, ""));
+            if (indexByStem.has(stem)) {
+              matched = indexByStem.get(stem);
+            }
+          }
+          if (matched) {
+            return {
+              fileName: rawName,
+              matchedFileName: matched,
+              resolvedPath: path.join(dirPath, matched),
+              exists: true,
+            };
+          }
+          return {
+            fileName: rawName,
+            matchedFileName: "",
+            resolvedPath: path.join(dirPath, rawName),
+            exists: false,
+          };
+        });
+        return { ok: true, results };
+      } catch (e) {
+        return { error: e && e.message ? e.message : String(e) };
+      }
+    });
+
+    ipcMain.handle("dialog:downloadBatchTemplate", async () => {
+      try {
+        const workbook = xlsx.utils.book_new();
+        const wsData = [
+          ["文件名", "标题", "简介", "标签", "视频号短标题"],
+          [
+            "第01集.mp4",
+            "精彩短剧第一集",
+            "第一集剧情简介",
+            "短剧,影视,追剧",
+            "短剧第一集精彩看点",
+          ],
+          [
+            "第02集.mp4",
+            "精彩短剧第二集",
+            "第二集剧情简介",
+            "短剧,影视,追剧",
+            "短剧第二集精彩看点",
+          ],
+        ];
+        const ws = xlsx.utils.aoa_to_sheet(wsData);
+        xlsx.utils.book_append_sheet(workbook, ws, "Sheet1");
+        const downloadsDir = electronApp.getPath("downloads");
+        const outPath = path.join(downloadsDir, "batch-publish-template.xlsx");
+        xlsx.writeFile(workbook, outPath);
+        shell.openPath(outPath);
+        return { ok: true, path: outPath };
+      } catch (e) {
+        return { ok: false, error: e && e.message ? e.message : String(e) };
+      }
+    });
+
+    ipcMain.handle("statr-server", async () => {
+      try {
+        const serveStatus = await Server.StatrServer();
+        return serveStatus;
+      } catch (error) {
+        dialog.showErrorBox("错误", error);
+      }
+    });
+    ipcMain.handle("stop-server", async (event, arg) => {
+      try {
+        const serveStatus = await Server.StopServer();
+        return serveStatus;
+      } catch (error) {
+        // dialog.showErrorBox("错误", error);
+      }
+    });
+    let childWin = null;
+    let cidArray = [];
+    ipcMain.handle("open-win", (event, arg) => {
+      let cidJson = { id: null, url: "" };
+      let data = cidArray.filter((currentValue) => {
+        if (currentValue.url === arg.url) {
+          return currentValue;
+        }
+      });
+      if (data.length > 0) {
+        //获取当前窗口
+        let currentWindow = BrowserWindow.fromId(data[0].id);
+        //聚焦窗口
+        currentWindow.focus();
+      } else {
+        //获取主窗口ID
+        let parentID = event.sender.id;
+        //创建窗口
+        childWin = new BrowserWindow({
+          width: arg?.width || 842,
+          height: arg?.height || 595,
+          //width 和 height 将设置为 web 页面的尺寸(译注: 不包含边框), 这意味着窗口的实际尺寸将包括窗口边框的大小，稍微会大一点。
+          useContentSize: true,
+          //自动隐藏菜单栏，除非按了Alt键。
+          autoHideMenuBar: true,
+          //窗口大小是否可调整
+          resizable: arg?.resizable ?? false,
+          //窗口的最小高度
+          minWidth: arg?.minWidth || 842,
+          show: arg?.show ?? false,
+          //窗口透明度
+          opacity: arg?.opacity || 1.0,
+          //当前窗口的父窗口ID
+          parent: parentID,
+          frame: IsUseSysTitle,
+          webPreferences: {
+            nodeIntegration: true,
+            webSecurity: false,
+            allowRunningInsecureContent: true,
+            //使用webview标签 必须开启
+            webviewTag: arg?.webview ?? false,
+            // 如果是开发模式可以使用devTools
+            devTools: process.env.NODE_ENV === "development",
+            // 在macos中启用橡皮动画
+            scrollBounce: process.platform === "darwin",
+            // 临时修复打开新窗口报错
+            contextIsolation: false,
+          },
+        });
+
+        childWin.loadURL(winURL + `#${arg.url}`);
+        cidJson.id = childWin?.id;
+        cidJson.url = arg.url;
+        cidArray.push(cidJson);
+        childWin.webContents.once("dom-ready", () => {
+          childWin.show();
+          childWin.webContents.send("send-data", arg.sendData);
+          if (arg.IsPay) {
+            // 检查支付时候自动关闭小窗口
+            const testUrl = setInterval(() => {
+              const Url = childWin.webContents.getURL();
+              if (Url.includes(arg.PayUrl)) {
+                childWin.close();
+              }
+            }, 1200);
+            childWin.on("close", () => {
+              clearInterval(testUrl);
+            });
+          }
+        });
+        childWin.on("closed", () => {
+          childWin = null;
+          let index = cidArray.indexOf(cidJson);
+          if (index > -1) {
+            cidArray.splice(index, 1);
+          }
+        });
+      }
+      childWin.on("maximize", () => {
+        if (cidJson.id != null) {
+          BrowserWindow.fromId(cidJson.id).webContents.send("w-max", true);
+        }
+      });
+      childWin.on("unmaximize", () => {
+        if (cidJson.id != null) {
+          BrowserWindow.fromId(cidJson.id).webContents.send("w-max", false);
+        }
+      });
+    });
+  },
+};

@@ -1,0 +1,233 @@
+---
+title: CLI 说明
+description: 矩媒 MatrixMedia 命令行：登录（抖音/视频号）、多平台发布、账号状态与发布历史查询。
+---
+
+# 命令行（CLI）说明
+
+在保留图形界面的前提下，同一可执行文件支持 CLI 子命令。入口为参数中出现 `cli`。
+
+> 返回 [首页](/) · 相关：[HTTP API](/reference/http-api) · [MCP](/reference/mcp)
+
+## 故障排除
+
+若启动时报 `require('electron') 异常` 且类型为 `string`，多半是环境变量 **`ELECTRON_RUN_AS_NODE`** 被设为 `1`。在该模式下 Electron 以纯 Node 运行，`require('electron')` 只会得到可执行文件路径。请在本终端执行 `unset ELECTRON_RUN_AS_NODE`，或在命令前显式清空后再启动，例如：
+
+```bash
+ELECTRON_RUN_AS_NODE= electron . cli publish --help
+```
+
+`yarn dev` 已尝试在子进程中清除该变量；若仍异常，请检查 shell 配置（如 `.zshrc`）是否全局导出了 `ELECTRON_RUN_AS_NODE`。
+
+## CLI 登录
+
+与 GUI `getCookie` / `LocalVideoPublish` 对齐的最小闭环，当前支持**抖音**和**视频号**两个平台。
+
+### 通用机制
+
+1. **会话**：`partition` 形如 `persist:<手机号段><平台名>`，与账号树、webview 一致。
+2. **Cookie 持久化**：登录成功后自动 `cookies.flushStore()` + `flushStorageData()`，确保 CLI 与 GUI 共用同一 `userData` 下的 `persist:` 分区。
+3. **终端扫码**：CLI 自动捕获二维码并在终端展示，用户扫码后继续轮询登录 Cookie。
+4. **退出**：检测到 Cookie 后关窗；超时 / 用户关窗返回码 3。
+
+### 抖音 CLI 登录
+
+- **登录判定**：轮询 `https://creator.douyin.com` 下 Cookie `passport_assist_user`。
+- **窗口模式**：默认屏外隐藏窗口 + 终端二维码；支持 `--puppeteer-headless` 无头模式。
+- `--show` 会被忽略（不弹窗）。
+
+```bash
+electron . cli login -p dy --phone 13800138000
+```
+
+### 视频号 CLI 登录
+
+- **登录判定**：轮询 `https://channels.weixin.qq.com` 下 Cookie `sessionid`，检测与旧值不同的新 sessionid 即为登录成功（支持重复登录）。
+- **窗口模式**：默认透明窗口（`opacity: 0`）+ 终端二维码；支持 `--show` 弹出可见登录窗口。
+- **UA 注入**：通过 puppeteer CDP `page.setUserAgent()` 在导航前设置微信 UA，覆盖主 frame + iframe 所有请求。
+- **QR 提取**：遍历所有 frame（含 wujie micro-frontend 的 `login-for-iframe`），从 `img.qrcode` 的 `data:` URL 直接解码。
+- 不支持 `--puppeteer-headless`。
+
+```bash
+# 终端二维码（默认，无弹窗）
+electron . cli login -p sph --phone 13800138000
+
+# 弹出登录窗口
+electron . cli login -p sph --phone 宠物 --show
+```
+
+### Linux / SSH 环境
+
+无显示器或 SSH 环境下请用 `xvfb-run -a` 提供虚拟显示：
+
+```bash
+xvfb-run -a ./MatrixMedia-*-linux-x86_64.AppImage cli login -p dy --phone 13800138000
+```
+
+若 stdout 不是 TTY（如管道重定向），终端截图可能无法正常展示，请在可交互终端中执行。参数见 `cli login --help`。成功后再执行 `cli publish`。
+
+## 发布视频
+
+```bash
+# 开发（项目根目录，需先 yarn dev 或已 build:dir）
+electron . cli publish -p dy --phone 13800138000 -f /path/to/video.mp4 -t "标题"
+
+# Windows 安装包产物
+matrixmedia.exe cli publish -p dy --phone 13800138000 -f C:\video.mp4 -t "标题"
+```
+
+### 参数摘要
+
+与界面 **本地视频发布**（`LocalVideoPublish.vue` → `buildVideoPayload` / `handleBatchPublish`）同一套字段：
+
+| 参数                      | 对应 GUI / 载荷字段                                                        |
+| ------------------------- | -------------------------------------------------------------------------- |
+| `-p` / `--platform`       | 发布平台                                                                   |
+| `-f` / `--file`           | 本地视频路径 → `filePath`、`data.textOtherName`（文件名无扩展名）          |
+| `--phone` / `--partition` | 会话分区，与账号树一致                                                     |
+| `-t` / `--title`          | **视频标题**（必填）→ `data.title`                                         |
+| `--description` / `--desc` | **视频简介** → `data.description`                                         |
+| `--short-title`            | **视频号短标题** → `data.shortTitle`，仅视频号消费                        |
+| `--name` / `--book-name`  | **名称**（任务记录名）→ `bookName`；省略时默认与视频文件名（无扩展名）一致 |
+| `--bt2`                   | 旧兼容字段：视频号作为短标题，其他平台作为简介                             |
+| `--tags` / `--bq`         | **视频标签** → `data.tags`                                                 |
+
+平台写入规则：
+
+| 平台 | `--title` | `--description` | `--short-title` | `--tags` |
+| ---- | --------- | --------------- | --------------- | -------- |
+| 抖音 / 快手 / 视频号 | 标题 | 与标签拼进正文 | 仅视频号填写 | 拼进正文末尾，建议带 `#` |
+| 小红书 | 标题 | 写入正文 | 忽略 | 独立话题控件 |
+| 哔哩哔哩 | 标题 | 写入简介控件 | 忽略 | 独立标签控件 |
+| 头条 / 百家号 | 标题 | 忽略 | 忽略 | 忽略 |
+| 番茄视频 | 不写元数据 | 不写元数据 | 不写元数据 | 不写元数据 |
+| `--address`               | **地址** → `data.address`（仅百家号）                                      |
+| `--publish-at`            | 一次性定时发布，格式 `YYYY-MM-DD HH:mm:ss`；创建后立即进入发布历史         |
+| `--show`                  | 当前 CLI 会忽略，仍后台运行                                                |
+| `--no-close-window`       | CLI 下无效，仅与 GUI 显示窗口场景有关                                      |
+| `--draft`                 | 保存到平台草稿箱，不直接发布                                               |
+| `--cover`                 | 自定义封面图片路径（抖音 / 快手 / 视频号，单文件模式生效；竖封面 3:4 比例最佳，抖音横封面基于竖封面自动生成；视频号仅收 jpg/png；`--dir` 批量模式会忽略并提示） |
+| `--sph-product-id`        | 视频号商品上架快捷参数（商品编号）；其他平台忽略 |
+| `--sph-drama-id` | 视频号小程序短剧挂载快捷参数（**短剧名称**，如 `泳陷错恋`）；其他平台忽略                           |
+| `--sph-series-id` | 视频号剧集挂载快捷参数（**剧集名称**，视频号原生剧集）；其他平台忽略                           |
+| `--sph-link-type`         | 视频号链接类型，支持 `none` / `product` / `mini_drama` / `sph_series`（也接受 `短剧` / `drama` / `剧集` / `series` 等别名）；其他平台忽略                  |
+| `--sph-link-value`        | 视频号链接值：商品编号，或短剧 / 剧集**名称**；只传该参数时默认按商品上架                                 |
+
+完整说明请执行：
+
+```bash
+<应用> cli publish --help
+```
+
+### 退出码
+
+| 码  | 含义                                           |
+| --- | ---------------------------------------------- |
+| 0   | 成功                                           |
+| 1   | 未捕获异常                                     |
+| 2   | 参数错误                                       |
+| 3   | 任务失败（如未登录、上传失败）                 |
+| 4   | 视频号链接添加失败，视频已转存草稿，需人工检查 |
+
+视频号商品上架并保存草稿：
+
+```bash
+electron . cli publish -p sph --phone 13800138000 -f /path/to/video.mp4 \
+  -t "视频标题" --description "视频简介" --short-title "视频号短标题" --draft \
+  --sph-product-id 10000591263144
+```
+
+视频号挂载小程序短剧（值填**短剧名称**，取自发布页「选择需要关联的短剧」列表）：
+
+```bash
+electron . cli publish -p sph --phone 13800138000 -f /path/to/video.mp4 \
+  -t "短剧第一集" --draft --sph-drama-id 泳陷错恋
+```
+
+视频号挂载剧集（值填**剧集名称**；与小程序短剧互斥，一次只挂一种）：
+
+```bash
+electron . cli publish -p sph --phone 13800138000 -f /path/to/video.mp4 \
+  -t "短剧第一集" --draft --sph-series-id 儿媳给我办寿宴
+```
+
+> 参数名保留 `-id` 后缀以兼容既有脚本，**实际取值是名称而不是编号**。
+> 传数字编号会搜索不到目标，命令不会报错但会走「转存草稿」兜底。
+> 例如下面这条是**错误用法**（`1234567890` 不是名称）：
+>
+> ```bash
+> # ✗ 错误：值为编号，搜不到
+> electron . cli publish -p sph --phone 13800138000 -f /path/to/video.mp4 \
+>   -t "短剧第一集" --draft --sph-drama-id 1234567890
+> ```
+>
+> 正确做法是填发布页「选择需要关联的短剧」列表里看到的名称。
+
+短剧 / 剧集添加失败时不会直接发布：主进程会等视频处理完成后自动转存草稿，返回 `status: needs_attention`、退出码 `4`，需要人工到视频号后台确认。排查与文案候选调整见仓库内 `docs/sph-links.md`。
+
+视频号链接参数属于视频号专属能力。即使误传给抖音、B 站等其他平台，也会被忽略，不会阻断任务。
+
+### 注意事项
+
+1. **登录态**：CLI 与 GUI 共用同一 `partition` 会话（`userData` 固定为 `matrix-video`）。抖音和视频号可使用 **`cli login`** 在终端完成扫码登录；其它平台可先在 GUI 登录，或保证该 `partition` 已有有效 Cookie。
+2. **与 GUI 同时运行**：CLI 模式不会申请单实例锁；若与 GUI 同时使用同一账号 partition，可能导致会话冲突，建议错峰使用。
+3. **进程生命周期**：CLI 仍会启动一个 Electron 主进程，只是不显示 GUI。命令完成、参数失败或业务失败后会主动退出；执行发布期间进程存在属于正常现象。
+4. **启动诊断**：终端会依次输出 Puppeteer 初始化、Electron ready、CLI 参数识别和最终退出码。初始化超过 15 秒会以退出码 `1` 结束并打印明确错误，不会无限静默等待。
+5. **登录失效**：视频号发布页若跳转到 `channels.weixin.qq.com/login.html`，CLI 会立即提示重新登录并以退出码 `3` 结束，不再按普通 URL 不匹配重复重试。
+6. **定时发布**：`--publish-at "YYYY-MM-DD HH:mm:ss"` 只支持一次性明确时间点，不支持每日/每周/每月。定时任务会写入发布历史，状态为“等待定时发布”；如果应用关闭导致错过执行时间，下次启动会标记为“任务过期”，可在视频管理中重新发布。
+7. **Linux 打包**：使用 `yarn build:linux` 生成 AppImage（需在本机构建环境安装相应依赖）。
+
+## 发布掘金文章
+
+掘金文章发布复用 GUI 中已登录的掘金账号会话，`--phone` / `--partition` 需要与界面里的掘金账号一致。正文可以直接传入 `--content`，也可以通过 `--file` / `-f` 读取本地 `.md` / `.txt` 文件；至少提供一个，同时提供时优先使用 `--content`。
+
+```bash
+electron . cli publish-article -p juejin --phone 13800138000 -t "文章标题" --file ./post.md
+electron . cli publish-article -p juejin --phone 13800138000 -t "文章标题" --content "正文内容" --tags "前端 electron"
+electron . cli publish-article -p juejin --phone 13800138000 -t "文章标题" --file ./post.md --publish-at "2026-05-13 10:00:00"
+```
+
+### 参数摘要
+
+| 参数                      | 说明                                                                                 |
+| ------------------------- | ------------------------------------------------------------------------------------ |
+| `-p` / `--platform`       | 发布平台，当前支持 `juejin` / `jj` / `掘金`                                          |
+| `--phone` / `--partition` | 会话分区，与 GUI 掘金账号一致                                                        |
+| `-t` / `--title`          | 文章标题                                                                             |
+| `--content`               | 文章正文，至少与 `--file` / `-f` 提供一个；同时提供时优先使用 `--content`            |
+| `-f` / `--file`           | `.md` / `.txt` 正文文件，至少与 `--content` 提供一个；同时提供时优先使用 `--content` |
+| `--cover`                 | 可选封面图片                                                                         |
+| `--category`              | 分类，默认“前端”                                                                     |
+| `--tags`                  | 空格分隔标签，默认“前端 electron”                                                    |
+| `--summary`               | 可选摘要，不传则由掘金自动生成                                                       |
+| `--publish-at`            | 一次性定时发布，格式 `YYYY-MM-DD HH:mm:ss`                                           |
+
+## 构建命令
+
+- `yarn build`：Windows x64 NSIS
+- `yarn build:mac`：macOS dmg（x64 + arm64）
+- `yarn build:linux`：Linux AppImage
+- `yarn build:all`：Windows + Linux + macOS
+
+## 数据统计命令（stats / stats-sync / stats-work）
+
+基于平台页面登录态采集账号数据（粉丝/播放/点赞/评论/收藏 + 单作品明细），支持平台：抖音、视频号、哔哩哔哩、百家号、头条、快手、小红书（番茄视频、掘金无数据接口）。
+
+| 命令 | 说明 |
+| --- | --- |
+| `cli stats -p <平台> --phone <分组>` | 读取本地快照中的账号粉丝数据 |
+| `cli stats-sync -p <平台> --phone <分组>` | 主动采集该账号最新数据并写入本地快照 |
+| `cli stats-work -p <平台> --phone <分组> --title <标题>` | 按完整标题查询某个视频的发布数据（含发布时间） |
+
+- 平台参数支持短码：`dy` `sph` `blbl` `bjh` `tt` `ks` `xhs` 或中文名
+- `--phone` 为分组名（与 GUI「媒体平台管理」中的分组一致）
+- 输出 JSON（含 `success` 字段）；`stats-sync` 需该分组此平台已在 GUI 登录
+- 数据存于 `<userData>/data-stats/<分组>/<平台>/`，与 GUI「账号数据」页共享
+
+示例：
+
+```bash
+matrixmedia cli stats -p sph --phone 123
+matrixmedia cli stats-sync -p dy --phone 123
+matrixmedia cli stats-work -p ks --phone 123 --title "你家猫也这样睡？倒挂笼子都不醒"
+```

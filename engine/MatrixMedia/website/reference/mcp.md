@@ -1,0 +1,208 @@
+---
+title: MCP Server
+description: 矩媒 MatrixMedia MCP Server：通过 Model Context Protocol 让 Claude Desktop、Cursor 等 AI 工具直接操作登录与发布。
+---
+
+# MCP Server 说明
+
+仓库内置 `mcp/` 子包，实现了 [Model Context Protocol](https://modelcontextprotocol.io) Server，让支持 MCP 的 AI 工具**无需 shell 调用**即可直接操作 MatrixMedia。
+
+MCP **不直接请求 HTTP**，而是通过 stdio transport 接收 tool 调用，内部 `spawn` CLI 子进程完成实际操作。
+
+## 构建
+
+```bash
+cd mcp && npm install && npm run build
+```
+
+构建产物：`mcp/dist/index.js`
+
+## 配置 AI 工具
+
+将 `MATRIXMEDIA_DIR` 设为本仓库根目录的绝对路径。
+
+**Claude Desktop**（`~/Library/Application Support/Claude/claude_desktop_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "matrixmedia": {
+      "command": "node",
+      "args": ["<MATRIXMEDIA_DIR>/mcp/dist/index.js"],
+      "env": {
+        "MATRIXMEDIA_DIR": "<MATRIXMEDIA_DIR>"
+      }
+    }
+  }
+}
+```
+
+**Cursor / Cline**（`.cursor/mcp.json` 或全局 MCP 配置，格式相同）：
+
+```json
+{
+  "mcpServers": {
+    "matrixmedia": {
+      "command": "node",
+      "args": ["<MATRIXMEDIA_DIR>/mcp/dist/index.js"],
+      "env": {
+        "MATRIXMEDIA_DIR": "<MATRIXMEDIA_DIR>"
+      }
+    }
+  }
+}
+```
+
+重启 AI 工具后即可在对话中调用下方 tool。
+
+## Tool 一览
+
+| Tool              | 底层 CLI                  | 说明                                           |
+| ----------------- | ------------------------- | ---------------------------------------------- |
+| `list_accounts`   | `cli accounts --json`     | 列出本机已登录账号，支持按平台过滤             |
+| `list_history`    | `cli history --json`      | 查询本机发布记录，支持按平台/状态/天数过滤     |
+| `publish_video`   | `cli publish ...`         | 发布视频（最长约 35 分钟，支持草稿和定时发布） |
+| `publish_article` | `cli publish-article ...` | 发布掘金文章（需已登录掘金账号）               |
+| `get_account_stats`  | `cli stats`          | 读账号粉丝数据（本地快照）                     |
+| `sync_account_stats` | `cli stats-sync`     | 主动采集该账号最新数据                         |
+| `get_work_stats`     | `cli stats-work`     | 按完整标题查视频发布数据                       |
+
+### list_accounts
+
+| 参数       | 必填 | 说明                                                                              |
+| ---------- | ---- | --------------------------------------------------------------------------------- |
+| `platform` | 否   | 平台过滤：`dy` / `ks` / `blbl` / `bjh` / `tt` / `sph` / `xhs` / `juejin` / `fqsp` |
+
+### list_history
+
+| 参数       | 必填 | 说明                                              |
+| ---------- | ---- | ------------------------------------------------- |
+| `days`     | 否   | 最近 N 天，默认 7                                 |
+| `platform` | 否   | 平台过滤                                          |
+| `status`   | 否   | `success` / `failed` / `publishing` / `scheduled` |
+| `all`      | 否   | 为 `true` 时返回全部历史                          |
+
+### publish_video
+
+视频元数据与 CLI / HTTP 一致：`title` 为标题，`description` 为简介，`shortTitle` 仅视频号短标题，`tags` 为标签。抖音 / 快手 / 视频号会把简介与标签拼进正文；哔哩哔哩简介和标签各自独立填写。旧字段 `bt2` 仍兼容：视频号当短标题，其他平台当简介。
+
+| 参数           | 必填 | 说明                                                          |
+| -------------- | ---- | ------------------------------------------------------------- |
+| `platform`     | 是   | `dy` / `ks` / `blbl` / `bjh` / `tt` / `sph`                   |
+| `file`         | 是   | 视频文件绝对路径                                              |
+| `title`        | 是   | 视频标题                                                      |
+| `description`  | 否   | 视频简介或正文                                                |
+| `shortTitle`   | 否   | 视频号短标题，建议 6～16 字；其他平台忽略                     |
+| `phone`        | 是   | 账号手机号，用于推导 session partition                        |
+| `bt2`          | 否   | 旧兼容字段：视频号作为短标题，其他平台作为简介                |
+| `tags`         | 否   | 标签字符串                                                    |
+| `address`      | 否   | 地址（百家号等）                                              |
+| `publishAt`    | 否   | 定时发布，`YYYY-MM-DD HH:mm`                                  |
+| `show`         | 否   | 是否显示底层浏览器窗口                                        |
+| `draft`             | 否   | `true` 时保存到草稿箱，不直接发布                             |
+| `creativeStatement` | 否   | 创作声明 / 视频号视频标注                                     |
+| `sphProductId`      | 否   | 视频号商品上架编号（推荐） |
+| `sphDramaId`        | 否   | 视频号小程序短剧挂载（**短剧名称**，如 `泳陷错恋`）                          |
+| `sphSeriesId`       | 否   | 视频号剧集挂载（**剧集名称**，视频号原生剧集）                          |
+| `sphLink`           | 否   | 视频号链接对象（`type` 支持 `none` / `product` / `mini_drama` / `sph_series`）；与 `sphProductId` / `sphDramaId` / `sphSeriesId` 同时传时优先快捷字段 |
+
+视频号商品上架草稿调用参数示例：
+
+```json
+{
+  "platform": "sph",
+  "file": "D:\\videos\\a.mp4",
+  "title": "视频标题",
+  "phone": "13800138000",
+  "description": "视频简介",
+  "shortTitle": "视频号短标题",
+  "draft": true,
+  "sphProductId": "10000591263144",
+  "creativeStatement": "含AI生成内容"
+}
+```
+
+视频号挂载小程序短剧（值填**短剧名称**，取自发布页「选择需要关联的短剧」列表）：
+
+```json
+{
+  "platform": "sph",
+  "file": "D:\\videos\\a.mp4",
+  "title": "短剧第一集",
+  "phone": "13800138000",
+  "draft": true,
+  "sphDramaId": "泳陷错恋"
+}
+```
+
+视频号挂载剧集（值填**剧集名称**；与小程序短剧互斥，一次只挂一种）：
+
+```json
+{
+  "platform": "sph",
+  "file": "D:\\videos\\a.mp4",
+  "title": "短剧第一集",
+  "phone": "13800138000",
+  "draft": true,
+  "sphSeriesId": "儿媳给我办寿宴"
+}
+```
+
+当 `platform` 不是 `sph` 时，`sphProductId` / `sphDramaId` / `sphSeriesId` / `sphLink` 会被忽略。若商品、短剧或剧集添加失败但视频已成功转存草稿，Tool 返回 `status: needs_attention`，不会误报为发布成功。
+
+### publish_article
+
+| 参数        | 必填   | 说明                   |
+| ----------- | ------ | ---------------------- |
+| `platform`  | 是     | 目前仅支持 `juejin`    |
+| `phone`     | 是     | 已登录掘金账号手机号   |
+| `title`     | 是     | 文章标题               |
+| `content`   | 二选一 | 正文内容               |
+| `file`      | 二选一 | Markdown 文件路径      |
+| `cover`     | 否     | 封面图片路径           |
+| `category`  | 否     | 分类                   |
+| `tags`      | 否     | 标签                   |
+| `summary`   | 否     | 摘要                   |
+| `publishAt` | 否     | 定时发布时间           |
+| `show`      | 否     | 是否显示底层浏览器窗口 |
+
+### get_account_stats
+
+读取账号粉丝数据（本地快照）：粉丝/播放/点赞/评论/收藏等。
+
+| 参数       | 必填 | 说明                                                         |
+| ---------- | ---- | ------------------------------------------------------------ |
+| `phone`    | 是   | 分组名（GUI「媒体平台管理」中的分组）                        |
+| `platform` | 是   | `dy` / `sph` / `blbl` / `bjh` / `tt` / `ks` / `xhs`          |
+
+### sync_account_stats
+
+主动采集该账号最新数据并写入本地快照（复用 GUI 登录态，需该分组此平台已登录）。
+
+| 参数       | 必填 | 说明                                                         |
+| ---------- | ---- | ------------------------------------------------------------ |
+| `phone`    | 是   | 分组名                                                       |
+| `platform` | 是   | `dy` / `sph` / `blbl` / `bjh` / `tt` / `ks` / `xhs`          |
+
+### get_work_stats
+
+按完整标题查询某个视频的发布数据（播放/点赞/评论/分享/收藏/涨粉/发布时间），数据来自最近一次 `sync_account_stats` 采集。
+
+| 参数       | 必填 | 说明                                                         |
+| ---------- | ---- | ------------------------------------------------------------ |
+| `phone`    | 是   | 分组名                                                       |
+| `platform` | 是   | `dy` / `sph` / `blbl` / `bjh` / `tt` / `ks` / `xhs`          |
+| `title`    | 是   | 完整视频标题（精确匹配）                                     |
+
+没有数据时先调 `sync_account_stats` 采集，再用 `get_account_stats` / `get_work_stats` 读取。
+
+## 登录说明
+
+- 所有平台均需在 **GUI 中完成登录**后再通过 MCP 发布（`publish_video` / `publish_article`）。
+- MCP 运行在无头 stdio 环境，**无法弹出扫码窗口**。
+- 抖音 / 视频号可通过 CLI `cli login` 在终端完成扫码，MCP 会复用同一 session partition。
+
+## 相关文档
+
+- [CLI 说明](/reference/cli)
+- [HTTP API 说明](/reference/http-api)

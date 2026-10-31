@@ -1,0 +1,9 @@
+{
+  "phone": "你的账号分组",
+  "video": "/完整路径/样片.mov",
+  "title": "草稿测试标题",
+  "description": "用于验证草稿流程。",
+  "mode": "draft",
+  "visibility": "private",
+  "creativeStatement": "none"
+}

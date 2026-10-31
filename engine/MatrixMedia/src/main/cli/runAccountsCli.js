@@ -1,0 +1,180 @@
+"use strict";
+
+import path from "path";
+import fs from "fs";
+import { app, session } from "electron";
+import ptConfig from "../config/ptConfig";
+import { evaluateLoginCookies,resolveSphAccountLogin,resolveXhsAccountLogin } from "../../shared/loginState.js";
+import {buildAccountPartition} from "../../shared/accountPartition.js";
+import {resolveXhsAccountPartition} from "../../shared/xhsAuth.js";
+import {probeXhsSession} from "../services/xhsSession.js";
+import { probeSphSession } from "../services/sphAuthProbe.js";
+import { getSphSessionId } from "../services/cliLogin/sphSessionUtil.js";
+import { recoverSphLoginBackup } from "../services/cliLogin/sphLoginBackup.js";
+import { replaceSphCookies } from "../services/sphCookieSession.js";
+
+function getAccountsDir() {
+  const documents = app.getPath("documents");
+  return path.join(documents, "MatrixMedia", "data", "account");
+}
+
+function sphLoginBackupDir() {
+  return path.join(app.getPath("userData"), "sph-login-backup");
+}
+
+function readAccounts() {
+  const dir = getAccountsDir();
+  if (!fs.existsSync(dir)) return [];
+  const files = fs.readdirSync(dir).filter(f => f.endsWith(".json"));
+  const seen = new Map();
+  for (const f of files) {
+    let list;
+    try {
+      list = JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"));
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      if (!item || !item.phone || !item.pt) continue;
+      const key = `${item.phone}__${item.pt}`;
+      const prev = seen.get(key);
+      if (!prev || (item.createTime || 0) > (prev.createTime || 0)) {
+        seen.set(key, item);
+      }
+    }
+  }
+  return Array.from(seen.values()).sort((a, b) => {
+    if (a.phone !== b.phone) return String(a.phone).localeCompare(String(b.phone));
+    return String(a.pt).localeCompare(String(b.pt));
+  });
+}
+
+async function probeLogin(account) {
+  const xhsPartition=account.pt === "小红书"?resolveXhsAccountPartition(account):null;
+  if(xhsPartition&&!xhsPartition.ok)return {loggedIn:null,reason:xhsPartition.reason,expireMs:null};
+  const partition = xhsPartition?.partition || account.partition || buildAccountPartition(account.phone,account.pt);
+  const cfg = ptConfig[account.pt];
+  const probeUrl = account.url || (cfg && (cfg.listIndex || cfg.upload || cfg.index));
+  if (!probeUrl) {
+    return { loggedIn: false, reason: "缺少探测 URL", expireMs: null };
+  }
+  try {
+    // partition 用完整值：它本身不含 phone 的 `-` 后缀，再裁一次会打到
+    // 空 session 上，导致 cookie 判定与探测分属两个会话
+    const ses = session.fromPartition(partition);
+
+    // 视频号：上次 --force 登录若中途被杀，分区已被清空、磁盘上留有会话备份。
+    // 这里做一次保守恢复（仅当分区完全没有 sessionid 时才写入，绝不覆盖现存会话），
+    // 让状态查询能反映真实可用的登录态，而不是「登录成功过却显示无 cookie」。
+    if (account.pt === "视频号") {
+      try {
+        const message = await recoverSphLoginBackup({
+          dir: sphLoginBackupDir(),
+          partition,
+          getSessionId: () => getSphSessionId(partition),
+          probe: () => probeSphSession(partition),
+          restoreCookies: (cookies) => replaceSphCookies(ses, cookies),
+          onlyIfNoSession: true,
+        });
+        if (message) console.log(`[accounts] ${partition}: ${message}`);
+      } catch (e) {
+        console.warn(
+          `[accounts] ${partition} 恢复上次登录备份失败:`,
+          e && e.message
+        );
+      }
+    }
+
+    const cookies = await ses.cookies.get({ url: probeUrl });
+    // 与 GUI 侧 getCookie 共用同一套判定，避免两处规则漂移
+    const verdict = evaluateLoginCookies(account.pt, cookies);
+    if(account.pt === "小红书")return resolveXhsAccountLogin(verdict,await probeXhsSession(partition));
+    if (!verdict.loggedIn) return verdict;
+
+    // 视频号：cookie 存在不代表会话有效，额外做一次真实探测
+    if (account.pt === "视频号") {
+      const probed = await probeSphSession(partition);
+      return resolveSphAccountLogin(verdict,probed);
+    }
+    return verdict;
+  } catch (e) {
+    return { loggedIn: account.pt === "小红书"?null:false, reason: `查询失败: ${e.message || e}`, expireMs: null };
+  }
+}
+
+function formatExpire(ms) {
+  if (!ms) return "-";
+  const d = new Date(ms);
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+export async function runAccountsCli(options) {
+  const accounts = readAccounts();
+  const filtered = accounts.filter(a => {
+    if (options.platform && a.pt !== options.platform) return false;
+    if (options.phone && String(a.phone) !== String(options.phone)) return false;
+    return true;
+  });
+
+  const rows = [];
+  for (const a of filtered) {
+    const probe = await probeLogin(a);
+    if (options.onlyLoggedIn && !probe.loggedIn) continue;
+    if (options.onlyLoggedOut && probe.loggedIn!==false) continue;
+    rows.push({
+      phone: a.phone,
+      pt: a.pt,
+      partition: a.pt === "小红书"?resolveXhsAccountPartition(a).partition:a.partition || buildAccountPartition(a.phone,a.pt),
+      loggedIn: probe.loggedIn,
+      reason: probe.reason,
+      expireAt: probe.expireMs,
+      createdAt: a.createTime || null,
+    });
+  }
+
+  if (options.json) {
+    const json = JSON.stringify(rows, null, 2);
+    if (options.outFile) {
+      // 供 GUI 子进程读取：console 输出会混入 [startup] 等日志行，无法直接 JSON.parse
+      fs.writeFileSync(options.outFile, json, "utf-8");
+    } else {
+      console.log(json);
+    }
+    return 0;
+  }
+
+  if (rows.length === 0) {
+    console.log("（无匹配账号）数据目录：" + getAccountsDir());
+    return 0;
+  }
+
+  const header = ["账号", "平台", "登录态", "失效时间", "说明"];
+  const lines = rows.map(r => [
+    String(r.phone),
+    r.pt,
+      r.loggedIn===true ? "已登录" : r.loggedIn===null?'待核实':"未登录",
+    formatExpire(r.expireAt),
+    r.loggedIn ? "-" : r.reason || "-",
+  ]);
+  const widths = header.map((h, i) =>
+    Math.max(displayWidth(h), ...lines.map(row => displayWidth(row[i])))
+  );
+  const pad = (s, w) => s + " ".repeat(Math.max(0, w - displayWidth(s)));
+  const render = row => row.map((c, i) => pad(c, widths[i])).join("  ");
+  console.log(render(header));
+  console.log(widths.map(w => "-".repeat(w)).join("  "));
+  lines.forEach(r => console.log(render(r)));
+  const ok = rows.filter(r => r.loggedIn).length;
+  console.log(`\n共 ${rows.length} 个账号，已登录 ${ok}，未登录 ${rows.length - ok}`);
+  return 0;
+}
+
+function displayWidth(s) {
+  let w = 0;
+  for (const ch of String(s)) {
+    w += /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch) ? 2 : 1;
+  }
+  return w;
+}

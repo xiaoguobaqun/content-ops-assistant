@@ -1,0 +1,752 @@
+"use strict";
+import path from "path";
+import {buildAccountPartition} from "../../shared/accountPartition.js";
+
+import {
+  PLATFORM_ALIASES,
+  VIDEO_PUBLISH_CANONICAL,
+  resolvePublishPlatform,
+  isVideoPublishPlatform,
+} from "../../shared/publishPlatforms.js";
+import {
+  resolveCreativeStatementForPlatform,
+  getCreativeStatementPlatformKey,
+} from "../../shared/creativeStatement.js";
+import {
+  VIDEO_LINK_TYPES,
+  buildVideoLinkOption,
+} from "../../shared/videoLink.js";
+
+export { PLATFORM_ALIASES, VIDEO_PUBLISH_CANONICAL, resolvePublishPlatform };
+
+/**
+ * 解析 `cli publish` 后的 argv（不含子命令名 publish）
+ * @returns {{ ok: true, value: object } | { ok: false, error: string }}
+ */
+export function parsePublishArgs(subArgv) {
+  const args = Array.isArray(subArgv) ? subArgv : [];
+  if (args.includes("--help") || args.includes("-h")) {
+    return { ok: true, value: { help: true } };
+  }
+
+  const out = {
+    platform: null,
+    file: null,
+    phone: null,
+    partition: null,
+    title: null,
+    description: "",
+    shortTitle: "",
+    bookName: null,
+    bt2: null,
+    bq: "",
+    publishAt: null,
+    show: false,
+    closeWindowAfterPublish: true,
+    dir: null,
+    config: null,
+    cover: null,
+    creativeStatement: null,
+    draft: false,
+    publish: false,
+    visibility: null,
+    clientTaskId: null,
+    checkpointFile: null,
+    sphLinkType: null,
+    sphLinkValue: null,
+    publishOptions: {},
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--platform" || a === "-p") {
+      out.platform = args[++i];
+    } else if (a === "--file" || a === "-f") {
+      out.file = args[++i];
+    } else if (a === "--phone") {
+      out.phone = args[++i];
+    } else if (a === "--partition") {
+      out.partition = args[++i];
+    } else if (a === "--title" || a === "-t") {
+      out.title = args[++i];
+    } else if (a === "--description" || a === "--desc") {
+      out.description = args[++i] || "";
+    } else if (a === "--short-title") {
+      out.shortTitle = args[++i] || "";
+    } else if (a === "--name" || a === "--book-name") {
+      out.bookName = args[++i];
+    } else if (a === "--bt2") {
+      out.bt2 = args[++i];
+    } else if (a === "--tags" || a === "--bq") {
+      out.bq = args[++i] || "";
+    } else if (a === "--publish-at") {
+      out.publishAt = args[++i];
+    } else if (a === "--show") {
+      out.show = true;
+    } else if (a === "--no-close-window") {
+      out.closeWindowAfterPublish = false;
+    } else if (a === "--dir") {
+      out.dir = args[++i];
+    } else if (a === "--config" || a === "--xlsx") {
+      out.config = args[++i];
+    } else if (a === "--cover") {
+      out.cover = args[++i];
+    } else if (a === "--creative-statement" || a === "--cs") {
+      out.creativeStatement = args[++i];
+    } else if (a === "--draft") {
+      out.draft = true;
+    } else if (a === "--publish") {
+      out.publish = true;
+    } else if (a === "--visibility") {
+      out.visibility = args[++i];
+      if (!["private", "friends", "public"].includes(out.visibility)) {
+        return { ok: false, error: "--visibility 需要 private、friends 或 public" };
+      }
+    } else if (a === '--checkpoint-file') {
+      out.checkpointFile=args[++i];if(!out.checkpointFile||out.checkpointFile.startsWith('--'))return {ok:false,error:'--checkpoint-file 需要本机文件路径'};
+    } else if (a === "--task-id") {
+      out.clientTaskId = args[++i];
+      if (!/^[A-Za-z0-9:_-]{1,100}$/.test(out.clientTaskId || "")) return {ok:false,error:"--task-id 格式无效"};
+    } else if (a === "--sph-link-type") {
+      out.sphLinkType = args[++i];
+    } else if (a === "--sph-link-value") {
+      out.sphLinkValue = args[++i];
+    } else if (a === "--sph-product-id") {
+      // 商品上架快捷参数：等价于 --sph-link-type product --sph-link-value <id>
+      out.sphLinkType = VIDEO_LINK_TYPES.PRODUCT;
+      out.sphLinkValue = args[++i];
+    } else if (a === "--sph-drama-id") {
+      // 小程序短剧快捷参数：等价于 --sph-link-type mini_drama --sph-link-value <短剧名称>
+      out.sphLinkType = VIDEO_LINK_TYPES.MINI_DRAMA;
+      out.sphLinkValue = args[++i];
+    } else if (a === "--sph-series-id") {
+      // 视频号剧集快捷参数：等价于 --sph-link-type sph_series --sph-link-value <剧集名称>
+      out.sphLinkType = VIDEO_LINK_TYPES.SPH_SERIES;
+      out.sphLinkValue = args[++i];
+    }
+  }
+
+  if (!out.platform) {
+    return { ok: false, error: "缺少 --platform（或 -p），例如 dy / 抖音" };
+  }
+  const pt = resolvePublishPlatform(out.platform);
+  if (!VIDEO_PUBLISH_CANONICAL.includes(pt)) {
+    return { ok: false, error: `未知平台: ${out.platform}` };
+  }
+  out.platform = pt;
+  if(out.checkpointFile&&(!['视频号','小红书'].includes(pt)||!out.clientTaskId))return {ok:false,error:'检查点仅用于带 --task-id 的视频号草稿任务'};
+  if(pt==='视频号'&&out.clientTaskId&&(!out.draft||out.publish||!out.checkpointFile||out.dir||out.publishAt))return {ok:false,error:'受保护视频号任务必须为即时单文件 --draft，并提供 --checkpoint-file'};
+  if(pt==='小红书'&&out.clientTaskId){
+    if(String(out.bq||'').trim())return {ok:false,error:'受保护小红书草稿暂不支持话题参数，请填写标题与正文'};
+    if(!out.phone||!out.draft||out.publish||!out.checkpointFile||!path.isAbsolute(out.checkpointFile)||out.dir||out.publishAt||!path.isAbsolute(out.file||''))return {ok:false,error:'受保护小红书任务必须为即时本机单文件草稿，并提供绝对检查点路径'};
+    if(out.partition&&out.partition!==buildAccountPartition(out.phone,pt))return {ok:false,error:'小红书任务账号分区不匹配'};
+    if(out.shortTitle||out.bt2||!out.cover||!path.isAbsolute(out.cover)||[...String(out.title||'').trim()].length>20)return {ok:false,error:'小红书需要自选封面、20字以内标题，不接受短标题'};
+  }
+  if (out.draft && out.publish) {
+    return { ok: false, error: "--draft 与 --publish 不能同时使用" };
+  }
+  if (out.visibility != null && pt !== "抖音") {
+    return { ok: false, error: "--visibility 当前仅支持抖音" };
+  }
+  if (out.bt2) {
+    if (out.platform === "视频号" && !out.shortTitle) out.shortTitle = out.bt2;
+    if (out.platform !== "视频号" && !out.description)
+      out.description = out.bt2;
+  }
+
+  // 视频号链接是平台专属参数；误传给其他平台时直接忽略。
+  if (out.platform === "视频号") {
+    const hasType =
+      out.sphLinkType != null && String(out.sphLinkType).trim() !== "";
+    const hasValue =
+      out.sphLinkValue != null && String(out.sphLinkValue).trim() !== "";
+    // 只传商品编号时默认按商品上架处理。
+    if (hasValue && !hasType) {
+      out.sphLinkType = VIDEO_LINK_TYPES.PRODUCT;
+    }
+    const resolvedHasType =
+      out.sphLinkType != null && String(out.sphLinkType).trim() !== "";
+    if (resolvedHasType) {
+      const typeAliases = {
+        none: VIDEO_LINK_TYPES.NONE,
+        无: VIDEO_LINK_TYPES.NONE,
+        product: VIDEO_LINK_TYPES.PRODUCT,
+        商品: VIDEO_LINK_TYPES.PRODUCT,
+        mini_drama: VIDEO_LINK_TYPES.MINI_DRAMA,
+        drama: VIDEO_LINK_TYPES.MINI_DRAMA,
+        短剧: VIDEO_LINK_TYPES.MINI_DRAMA,
+        小程序短剧: VIDEO_LINK_TYPES.MINI_DRAMA,
+        微短剧: VIDEO_LINK_TYPES.MINI_DRAMA,
+        sph_series: VIDEO_LINK_TYPES.SPH_SERIES,
+        series: VIDEO_LINK_TYPES.SPH_SERIES,
+        剧集: VIDEO_LINK_TYPES.SPH_SERIES,
+        视频号剧集: VIDEO_LINK_TYPES.SPH_SERIES,
+      };
+      const linkType =
+        typeAliases[String(out.sphLinkType).trim().toLowerCase()];
+      if (!linkType) {
+        return {
+          ok: false,
+          error:
+            "--sph-link-type 当前仅支持 none、product、mini_drama 或 sph_series",
+        };
+      }
+      if (linkType === VIDEO_LINK_TYPES.PRODUCT && !hasValue) {
+        return {
+          ok: false,
+          error:
+            "视频号商品上架必须提供 --sph-product-id 或 --sph-link-value <商品编号>",
+        };
+      }
+      if (linkType === VIDEO_LINK_TYPES.MINI_DRAMA && !hasValue) {
+        return {
+          ok: false,
+          error:
+            "视频号短剧挂载必须提供 --sph-drama-id 或 --sph-link-value <短剧名称>",
+        };
+      }
+      if (linkType === VIDEO_LINK_TYPES.SPH_SERIES && !hasValue) {
+        return {
+          ok: false,
+          error:
+            "视频号剧集挂载必须提供 --sph-series-id 或 --sph-link-value <剧集名称>",
+        };
+      }
+      if (linkType === VIDEO_LINK_TYPES.NONE && hasValue) {
+        return {
+          ok: false,
+          error: "--sph-link-type none 不应同时提供编号",
+        };
+      }
+      const built = buildVideoLinkOption("视频号", linkType, out.sphLinkValue);
+      if (!built.ok) return { ok: false, error: built.error };
+      out.publishOptions = { link: built.value };
+    }
+  } else {
+    out.sphLinkType = null;
+    out.sphLinkValue = null;
+  }
+
+  if (!out.file && !out.dir) {
+    return {
+      ok: false,
+      error:
+        "缺少 --file（或 -f）视频文件路径，或 --dir + --config 批量目录模式",
+    };
+  }
+  if (out.file && out.dir) {
+    return { ok: false, error: "--file 和 --dir 不能同时使用" };
+  }
+  if (out.dir && !out.config) {
+    return {
+      ok: false,
+      error: "--dir 批量模式必须同时提供 --config <xlsx路径>",
+    };
+  }
+  if (out.dir && (out.visibility != null || out.publish)) {
+    return { ok: false, error: "批量目录模式暂不支持 --visibility / --publish，请使用单文件任务" };
+  }
+  if (out.publishAt && (out.visibility != null || out.publish || out.clientTaskId)) {
+    return {ok:false,error:"定时发布暂不支持 --visibility / --publish / --task-id，请使用即时单文件任务"};
+  }
+  if (out.dir && out.cover) {
+    console.warn(
+      "MatrixMedia: --dir/--config 批量模式暂不支持 --cover，已忽略（批量任务不会设置自定义封面）。"
+    );
+  }
+
+  if (!out.partition) {
+    if (!out.phone) {
+      return {
+        ok: false,
+        error:
+          "缺少 --phone 或完整 --partition（与 GUI 一致，如 persist:13800138000抖音）",
+      };
+    }
+    out.partition = buildAccountPartition(out.phone,out.platform);
+  }
+
+  if (!out.dir && (!out.title || !String(out.title).trim())) {
+    return {
+      ok: false,
+      error:
+        "缺少 --title（或 -t）视频标题（与 GUI「视频标题」一致，写入 data.bt1）",
+    };
+  }
+  // in dir mode title comes from xlsx per row, no global --title needed
+
+  if (out.show) {
+    console.warn(
+      "MatrixMedia: CLI publish 不显示浏览器窗口，已忽略 --show（--no-close-window 仅在与 GUI 显示窗口时有关，CLI 下无效）。"
+    );
+    out.show = false;
+  }
+
+  if (out.platform === "视频号") {
+    out.shortTitle = String(out.shortTitle || "").trim();
+    if (out.shortTitle) {
+      if (/[，。、\/,;:!?'"()\[\]{}<>]/.test(out.shortTitle)) {
+        return {
+          ok: false,
+          error: "视频号短标题不能包含特殊标点符号",
+        };
+      }
+      const length = Array.from(out.shortTitle).length;
+      if (length < 6 || length > 16) {
+        return {
+          ok: false,
+          error: "视频号短标题去除首尾空格后长度需为 6～16 字",
+        };
+      }
+    }
+  }
+
+  if (out.bq && /[,，、;；|]/.test(out.bq)) {
+    console.warn(
+      "MatrixMedia: --tags 推荐用空格分隔多个标签（如 '减脂 健身 教程'）；检测到 ,，、;；| 等分隔符，哔哩哔哩 / 小红书会按空格切分，逗号将作为单个标签字符保留。"
+    );
+  }
+
+  if (out.bq) {
+    const tags = String(out.bq).trim().split(/\s+/).filter(Boolean);
+    if (tags.length > 4) {
+      console.warn(
+        `MatrixMedia: --tags 共 ${tags.length} 个，建议最多 4 个话题；多余标签会降低每个话题的权重，生成层请按相关性裁到 4 个以内。`
+      );
+    }
+    const hashtagPlatforms = new Set(["视频号", "抖音", "快手"]);
+    if (hashtagPlatforms.has(out.platform)) {
+      out.bq = tags
+        .map((t) =>
+          String(t).startsWith("#") ? String(t) : `#${String(t).trim()}`
+        )
+        .join(" ");
+    }
+  }
+
+  return { ok: true, value: out };
+}
+
+function pickBodyValue(body, keys) {
+  for (const key of keys) {
+    const val = body[key];
+    if (val != null && String(val).trim() !== "") {
+      return String(val);
+    }
+  }
+  return null;
+}
+
+function normalizeBodyTags(value) {
+  return String(value || "")
+    .split(/[\s,，、;；|]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+/**
+ * 将 HTTP JSON 请求体转为 cli publish 等价 argv
+ * @param {object} body
+ * @returns {string[]}
+ */
+export function publishBodyToArgv(body) {
+  if (!body || typeof body !== "object") return [];
+  const argv = [];
+  const pushPair = (keys, flag) => {
+    const val = pickBodyValue(body, keys);
+    if (val != null) {
+      argv.push(flag, val);
+    }
+  };
+
+  pushPair(["platform", "p"], "-p");
+  pushPair(["file", "f"], "-f");
+  pushPair(["phone"], "--phone");
+  pushPair(["partition"], "--partition");
+  pushPair(["title", "t"], "-t");
+  pushPair(["description", "desc"], "--description");
+  pushPair(["shortTitle", "short-title"], "--short-title");
+  pushPair(["bookName", "name", "book-name"], "--name");
+  pushPair(["bt2"], "--bt2");
+  const tags = pickBodyValue(body, ["tags", "bq"]);
+  if (tags != null) argv.push("--tags", normalizeBodyTags(tags));
+  pushPair(["publishAt", "publish-at"], "--publish-at");
+  pushPair(
+    ["creativeStatement", "creative-statement", "cs"],
+    "--creative-statement"
+  );
+  pushPair(["cover", "coverPath", "cover-path"], "--cover");
+  pushPair(["visibility"], "--visibility");
+  pushPair(["clientTaskId"], "--task-id");
+  const sphLink =
+    (body.sphLink && typeof body.sphLink === "object" && body.sphLink) ||
+    (body.platformOptions &&
+      body.platformOptions.sph &&
+      body.platformOptions.sph.link);
+  const sphProductId = pickBodyValue(body, [
+    "sphProductId",
+    "sph-product-id",
+    "productId",
+  ]);
+  const sphDramaId = pickBodyValue(body, [
+    "sphDramaId",
+    "sph-drama-id",
+    "dramaId",
+  ]);
+  const sphSeriesId = pickBodyValue(body, [
+    "sphSeriesId",
+    "sph-series-id",
+    "seriesId",
+  ]);
+  if (sphProductId != null && String(sphProductId).trim() !== "") {
+    argv.push("--sph-product-id", String(sphProductId).trim());
+  } else if (sphDramaId != null && String(sphDramaId).trim() !== "") {
+    argv.push("--sph-drama-id", String(sphDramaId).trim());
+  } else if (sphSeriesId != null && String(sphSeriesId).trim() !== "") {
+    argv.push("--sph-series-id", String(sphSeriesId).trim());
+  } else if (sphLink && typeof sphLink === "object") {
+    if (sphLink.type != null && String(sphLink.type).trim() !== "") {
+      argv.push("--sph-link-type", String(sphLink.type));
+    }
+    if (sphLink.value != null && String(sphLink.value).trim() !== "") {
+      argv.push("--sph-link-value", String(sphLink.value));
+    }
+  }
+
+  if (body.show === true) argv.push("--show");
+  if (body.closeWindowAfterPublish === false) argv.push("--no-close-window");
+  if (body.draft === true) argv.push("--draft");
+  if (body.publish === true) argv.push("--publish");
+
+  return argv;
+}
+
+/**
+ * 解析 HTTP / CLI 共用的发布参数
+ * @param {object} body
+ */
+export function parsePublishRequest(body) {
+  if (body && Object.prototype.hasOwnProperty.call(body, "visibility") &&
+      (typeof body.visibility !== "string" || !["private", "friends", "public"].includes(body.visibility))) {
+    return {ok:false,error:"visibility 必须为 private、friends 或 public"};
+  }
+  return parsePublishArgs(publishBodyToArgv(body));
+}
+
+const SHARED_PUBLISH_BODY_KEYS = [
+  "file",
+  "f",
+  "title",
+  "t",
+  "description",
+  "desc",
+  "shortTitle",
+  "short-title",
+  "phone",
+  "partition",
+  "bookName",
+  "name",
+  "book-name",
+  "bt2",
+  "tags",
+  "bq",
+  "publishAt",
+  "publish-at",
+  "creativeStatement",
+  "creative-statement",
+  "cs",
+  "cover",
+  "coverPath",
+  "cover-path",
+  "show",
+  "closeWindowAfterPublish",
+  "draft",
+  "publish",
+  "visibility",
+  "clientTaskId",
+  "platformOptions",
+  "sphLink",
+  "sphProductId",
+  "sph-product-id",
+  "productId",
+  "sphDramaId",
+  "sph-drama-id",
+  "dramaId",
+  "sphSeriesId",
+  "sph-series-id",
+  "seriesId",
+];
+
+function extractSharedPublishBody(body) {
+  const shared = {};
+  for (const key of SHARED_PUBLISH_BODY_KEYS) {
+    if (body[key] != null && body[key] !== "") {
+      shared[key] = body[key];
+    }
+  }
+  return shared;
+}
+
+function mergePublishBody(shared, target) {
+  const sharedPlatformOptions =
+    shared.platformOptions && typeof shared.platformOptions === "object"
+      ? shared.platformOptions
+      : {};
+  const targetPlatformOptions =
+    target.platformOptions && typeof target.platformOptions === "object"
+      ? target.platformOptions
+      : {};
+  const platformOptions = { ...sharedPlatformOptions };
+  for (const [platformKey, options] of Object.entries(targetPlatformOptions)) {
+    platformOptions[platformKey] = {
+      ...(sharedPlatformOptions[platformKey] || {}),
+      ...(options || {}),
+    };
+  }
+  return {
+    ...shared,
+    ...target,
+    ...(Object.keys(platformOptions).length > 0 ? { platformOptions } : {}),
+  };
+}
+
+function normalizePublishTargets(body) {
+  const raw = body.platforms;
+  if (raw == null) return null;
+  const list = Array.isArray(raw)
+    ? raw
+    : String(raw)
+        .split(/[,，|]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+  if (list.length === 0) return null;
+
+  return list
+    .map((item) => {
+      if (typeof item === "string") {
+        return { platform: item };
+      }
+      if (item && typeof item === "object" && item.platform != null) {
+        return { ...item };
+      }
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function pickCreativeStatementFromMap(map, platformPt) {
+  if (!map || typeof map !== "object" || Array.isArray(map)) return null;
+  const keys = new Set([
+    platformPt,
+    getCreativeStatementPlatformKey(platformPt),
+  ]);
+  for (const [alias, canonical] of Object.entries(PLATFORM_ALIASES)) {
+    if (canonical === platformPt) keys.add(alias);
+  }
+  for (const key of keys) {
+    if (key && map[key] != null && String(map[key]).trim() !== "") {
+      return map[key];
+    }
+  }
+  return null;
+}
+
+function pickTargetCreativeStatement(target) {
+  if (!target || typeof target !== "object") return null;
+  return pickBodyValue(target, [
+    "creativeStatement",
+    "creative-statement",
+    "cs",
+  ]);
+}
+
+/**
+ * HTTP 创作声明解析（对齐 LocalVideoPublish 批量设置 + 单账号覆盖）
+ */
+export function resolveHttpPublishCreativeStatement(body, platformPt, target) {
+  let raw = pickTargetCreativeStatement(target);
+  if (raw == null) {
+    raw = pickCreativeStatementFromMap(body.creativeStatements, platformPt);
+  }
+  if (raw == null) {
+    raw = pickBodyValue(body, [
+      "creativeStatement",
+      "creative-statement",
+      "cs",
+    ]);
+  }
+  return resolveCreativeStatementForPlatform(raw, platformPt);
+}
+
+function applyHttpCreativeStatements(body, parsedValue, target = {}) {
+  return {
+    ...parsedValue,
+    creativeStatement: resolveHttpPublishCreativeStatement(
+      body,
+      parsedValue.platform,
+      target
+    ),
+  };
+}
+
+/**
+ * 解析 HTTP 发布请求；支持单平台 platform 或多平台 platforms
+ * @returns {{ ok: true, multi: boolean, value: object|object[] } | { ok: false, error: string }}
+ */
+export function parseMultiPublishRequest(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, error: "请求体必须是 JSON 对象" };
+  }
+
+  const targets = normalizePublishTargets(body);
+  if (!targets || targets.length === 0) {
+    const single = parsePublishRequest(body);
+    if (!single.ok) return single;
+    return {
+      ok: true,
+      multi: false,
+      value: applyHttpCreativeStatements(body, single.value, body),
+    };
+  }
+
+  if (body.platform != null && String(body.platform).trim() !== "") {
+    return {
+      ok: false,
+      error: "请只使用 platform 或 platforms 其一，不要同时传",
+    };
+  }
+
+  const shared = extractSharedPublishBody(body);
+  const parsed = [];
+  const skipped = [];
+
+  for (let i = 0; i < targets.length; i++) {
+    const merged = mergePublishBody(shared, targets[i]);
+    const item = parsePublishRequest(merged);
+    if (!item.ok) {
+      const label =
+        targets[i].platform != null ? String(targets[i].platform) : `#${i + 1}`;
+      // 对于未知平台，跳过并记录，不阻断其他平台的发布
+      const rawPt =
+        targets[i].platform != null ? String(targets[i].platform).trim() : "";
+      const canonical = resolvePublishPlatform(rawPt);
+      if (rawPt && !isVideoPublishPlatform(canonical)) {
+        skipped.push({ platform: rawPt, reason: item.error });
+        continue;
+      }
+      // 非「未知平台」的错误（如缺少 phone / title 等）仍然报错
+      return { ok: false, error: `平台 ${label}: ${item.error}` };
+    }
+    if (item.value.dir) {
+      return {
+        ok: false,
+        error: "HTTP API 暂不支持批量目录发布，请使用 cli publish --dir",
+      };
+    }
+    parsed.push(applyHttpCreativeStatements(body, item.value, targets[i]));
+  }
+
+  if (parsed.length === 0) {
+    const names = skipped.map((s) => s.platform).join(", ");
+    return {
+      ok: false,
+      error: `所有平台均不支持: ${names}`,
+    };
+  }
+
+  const publishAtSet = new Set(
+    parsed.map((item) => String(item.publishAt || "").trim()).filter(Boolean)
+  );
+  if (publishAtSet.size > 1) {
+    return {
+      ok: false,
+      error: "多平台定时发布时，各平台 publishAt 必须相同",
+    };
+  }
+
+  const fileSet = new Set(parsed.map((item) => String(item.file || "").trim()));
+  if (fileSet.size > 1) {
+    return { ok: false, error: "多平台发布需使用相同 file" };
+  }
+
+  const result = { ok: true, multi: parsed.length > 1, value: parsed };
+  if (skipped.length > 0) {
+    result.skipped = skipped;
+  }
+  return result;
+}
+
+export function publishHelpText() {
+  return `
+用法: <应用> cli publish [选项]
+
+字段与 GUI「本地视频发布」弹窗一致（见 LocalVideoPublish buildVideoPayload）：
+
+选项:
+  -p, --platform <id>   平台：dy|抖音、tt|头条、ks|快手、blbl|哔哩哔哩、bjh|百家号、sph|视频号、xhs|小红书、fqsp|番茄视频
+  -f, --file <path>     本地视频文件路径，或 http(s) 远程视频 URL（远程会先下载到临时目录，发布结束后自动删除）
+      --dir <path>          [batch] video directory path; must be paired with --config
+      --config <path>       [batch] xlsx 声明文件（列：文件名/标题/简介/标签/视频号短标题/创作声明）
+      --cs, --creative-statement <val>  creative statement value for single-file mode.
+                            Valid values: none | ai_generated | fiction | marketing | personal_opinion | repost | self_made_no_repost
+                            (self_made_no_repost is blbl-only). Default: none.
+      --cover <path>    自定义封面图片路径（抖音/快手/视频号单文件模式生效；竖封面 3:4 比例最佳，
+                            抖音横封面基于竖封面自动生成；视频号仅收 jpg/png）
+      --phone <id>      账号手机号（与 GUI 账号树一致，可与 partition 二选一）
+      --partition <p>   完整 session partition，如 persist:13800138000抖音
+  -t, --title <text>    视频标题（必填）→ data.title
+      --description <text> 视频简介或正文 → data.description
+      --short-title <text> 视频号短标题 → data.shortTitle，建议 6～16 字
+      --name <n>        名称 / 任务记录名 → bookName；默认与视频文件名（无扩展名）一致
+      --book-name <n>   同 --name
+      --bt2 <text>      旧兼容字段：视频号作为短标题，其他平台作为简介
+      --tags <text>     视频标签 → data.bq（同 --bq）。多个标签用【空格】分隔，例如 "减脂 健身 教程"。
+                            【上限 4 个话题】：超过 4 个会触发 warn，agent 生成时请按相关性裁到 ≤ 4。
+                            • 视频号/抖音/快手：整串拼进描述末尾；未写 # 的标签会自动补上（与 GUI 标签多选一致）。
+                            • 哔哩哔哩/小红书：按空格切分为独立标签，前导 # 会被自动剥离，可省。
+                            • 百家号/头条：当前代码不消费 bq，无需填。
+      --publish-at <t>  一次性定时发布，格式 "YYYY-MM-DD HH:mm:ss"。创建后立即写入发布历史，
+                            到点后由应用主进程调度执行；不支持每日/每周/每月循环。
+      --show            （已忽略）CLI 不显示自动化窗口
+      --no-close-window 发布后不自动关窗（仅 GUI 显示窗口时有效；CLI 始终后台运行）
+      --draft           显式发布到草稿箱（小红书点「暂存离开」）。若账号在 GUI「媒体平台管理」
+                            里开启了「默认发布到草稿」，即使不加该参数也会自动走草稿。
+      --publish         单文件显式实际发布，覆盖账号默认草稿设置；与 --draft 互斥
+      --visibility <v>  抖音单文件：private（仅自己可见）| friends | public；提交前读回验证
+      --task-id <id>    外部任务编号，建立独立历史记录；新增参数暂不支持 --publish-at 定时模式
+      --sph-product-id <id>   视频号商品上架（快捷参数，等价于 product + 商品编号）
+      --sph-drama-id <name>   视频号挂载小程序短剧。值为短剧「名称」而非编号（发布页按名称搜索），
+                                如 --sph-drama-id 泳陷错恋；传数字编号会搜不到。
+      --sph-series-id <name>  视频号挂载剧集（视频号原生剧集，区别于小程序短剧）。同样传「名称」而非编号。
+      --sph-link-type <type>  视频号链接类型：none | product | mini_drama | sph_series（也接受 drama / 短剧 / series / 剧集）；传给其他平台时忽略
+      --sph-link-value <v>    视频号链接值：商品编号，或短剧/剧集名称；只传该参数时默认按商品上架
+  -h, --help            显示帮助
+
+退出码 (单文件): 0 成功, 1 异常, 2 参数错误, 3 任务失败（上传未成功）, 4 已转存草稿需检查
+退出码 (批量 --dir): 0 全部成功, 1 部分失败, 2 全部失败
+
+示例:
+  matrixmedia.exe cli publish -p dy --phone 13800138000 -f C:\\\\v.mp4 -t "我的视频标题" --tags "#减脂 #健身"
+  electron . cli publish -p dy --phone 13800138000 -f ./a.mp4 --name "任务A" -t "标题" --tags "#标签1 #标签2"
+  # 视频号用 --short-title，其他平台用 --description：
+  matrixmedia cli publish -p sph --phone 13800138000 -f ./v.mp4 \\\\
+    -t "新手第一天跑步就坚持 5 公里是什么体验" \\\\
+    --description "第一次跑步的完整过程" \\\\
+    --short-title "5公里新手挑战" \\\\
+    --tags "跑步 新手 减脂" \\
+    --sph-product-id 10000591263144 --draft
+  # 视频号挂载小程序短剧（短剧名称取自视频号发布页「选择需要关联的短剧」列表，如 泳陷错恋；失败会自动转存草稿）：
+  matrixmedia cli publish -p sph --phone 13800138000 -f ./v.mp4 \\\\
+    -t "短剧第一集" --draft --sph-drama-id 泳陷错恋
+  # 视频号挂载剧集（剧集名称取自发布页剧集列表；与小程序短剧互斥，一次只挂一种）：
+  matrixmedia cli publish -p sph --phone 13800138000 -f ./v.mp4 \\\\
+    -t "短剧第一集" --draft --sph-series-id 天作剧场
+  # 哔哩哔哩独立标签控件，空格分隔、是否带 # 都可：
+  matrixmedia cli publish -p blbl --phone 13800138000 -f ./v.mp4 -t "标题" --tags "游戏 解说 开黑"
+  # 一次性定时发布：必须提供实际视频、标题、账号等完整发布参数
+  matrixmedia cli publish -p dy --phone 13800138000 -f ./v.mp4 -t "标题" --publish-at "2026-05-05 20:30:00"
+  # batch publish with xlsx config:
+  matrixmedia cli publish -p dy --phone 13800138000 --dir ./videos --config ./videos/batch.xlsx
+`.trim();
+}

@@ -1,0 +1,8 @@
+.validation/
+.DS_Store
+.local/
+node_modules/
+.superpowers/
+dist/
+*.app
+
