@@ -43,3 +43,13 @@ test('platform links and native approval cannot enable unverified platform publi
   assert.equal(executionAllowed({...job,mode:'draft',visibility:'unknown'},null),true);
   assert.equal(executionAllowed({...job,platform:'xhs',mode:'draft'},null),false);
 });
+
+test('batch native approval binds digest attempt and exact unfinished child IDs',()=>{
+ const {batchExecutionAllowed}=require('../desktop/ipc-policy.cjs');const batch={kind:'batch',id:'batch',digest:'abc',attempt:1,mode:'draft',canExecute:true,targetIds:['child-2'],needsVerification:false,requiresUnknownConfirmation:false};
+ const approval={id:'batch',digest:'abc',attempt:1,targetIds:['child-2'],confirmed:true};
+ assert.equal(batchExecutionAllowed(batch,approval),true);
+ for(const change of [{digest:'old'},{attempt:0},{targetIds:['child-1','child-2']},{confirmed:false}])assert.equal(batchExecutionAllowed(batch,{...approval,...change}),false);
+ assert.equal(batchExecutionAllowed({...batch,needsVerification:true},approval),false);
+ assert.equal(batchExecutionAllowed({...batch,requiresUnknownConfirmation:true},approval),false);
+ assert.equal(batchExecutionAllowed({...batch,requiresUnknownConfirmation:true},{...approval,allowUnknown:true}),true);
+});

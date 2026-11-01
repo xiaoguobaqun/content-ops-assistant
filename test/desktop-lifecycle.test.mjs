@@ -31,6 +31,12 @@ test('quitting during a pending stop cannot restart a new worker',async()=>{
   const f=await nativeFixture();const pending=f.request('stop');await tick();f.app.emit('before-quit',{preventDefault(){}});await tick();f.release();await pending;await tick();
   assert.equal(f.workers.length,1);assert.equal(f.app.exited,true);
 });
+test('native batch confirmation names the person and all targets and ignores renderer-supplied scope',async()=>{
+ const f=await nativeFixture(),calls=[];const batch={kind:'batch',id:'batch',person:{name:'人员示例'},title:'合成内容',mode:'draft',canExecute:true,attempt:0,digest:'stored',targetIds:['dy-child'],jobs:[{id:'dy-child',platformName:'抖音',phone:'抖音示例',statusLabel:'待执行'},{id:'xhs-child',platformName:'小红书',phone:'小红书示例',blockedReason:'待验收，本次不会执行'}]};
+ f.workers[0].request=async(method,args)=>{calls.push({method,args});return method==='getBatch'?batch:{activity:{status:'running'}};};
+ const result=await f.request('executeBatch',{id:'batch',targetIds:['xhs-child'],expectedDigest:'forged'});assert.equal(result.activity.status,'running');
+ assert.deepEqual(JSON.parse(JSON.stringify(calls[1].args)),{id:'batch',expectedDigest:'stored',expectedAttempt:0,targetIds:['dy-child']});
+});
 test('stdin EOF cancels an active service child instead of waiting for it to publish',async t=>{
   const temporary=await fs.mkdtemp(path.join(os.tmpdir(),'ops-eof-'));t.after(()=>fs.rm(temporary,{recursive:true,force:true}));
   const processUrl=pathToFileURL(path.join(root,'src/process.mjs')).href,cancellationUrl=pathToFileURL(path.join(root,'src/cancellation.mjs')).href;

@@ -12,7 +12,7 @@ export function jobView(job,{active=false}={}){
     videoPath:files.video?.path||'',videoName:path.basename(files.video?.path||''),coverPath:files.cover?.path||'',videoSize:files.video?.size||0,
     createdAt:job.createdAt,startedAt:job.startedAt,finishedAt:job.finishedAt,checkedAt:job.checkedAt,
     message:job.message||detailMessage||(p.executionEnabled===false?'小红书草稿尚未完成实机验收，暂不可执行':''),platformWorkId:job.platformWorkId||null,platformUrl:job.platformUrl||null,
-    screenshotPath:job.verification?.screenshot||null,moderation:job.moderation||'unknown',canExecute:job.state==='prepared'&&p.executionEnabled!==false,canVerify:!!job.startedAt};
+    batchId:input.batchId||null,screenshotPath:job.verification?.screenshot||null,moderation:job.moderation||'unknown',canExecute:!input.batchId&&job.state==='prepared'&&p.executionEnabled!==false,canVerify:!!job.startedAt};
 }
 export function validateInput(raw){
   if(!raw||typeof raw!=='object')throw Error('请先填写任务内容');

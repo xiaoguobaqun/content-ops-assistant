@@ -8,6 +8,8 @@ import {withEngineLock} from './lock.mjs';
 import {throwIfCancelled} from './cancellation.mjs';
 import {platformId,validatePlatformInput,assertPlatformExecution,draftConfirmed} from './platforms.mjs';
 import { matchDouyinWork } from '../engine/MatrixMedia/src/shared/douyinWork.js';
+import {assertBatchChild} from './batch-guard.mjs';
+import {localId} from './local-store.mjs';
 
 export const defaultRoot=fileURLToPath(new URL('../.local',import.meta.url));
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -35,10 +37,11 @@ async function probe(file,label){
 export async function readJob(id,{root=defaultRoot}={}){return JSON.parse(await fs.readFile(path.join(jobDir(root,id),'job.json'),'utf8'));}
 const save=(job,root)=>atomicJson(path.join(jobDir(root,job.id),'job.json'),job);
 
-export async function prepareJob(raw,{root=defaultRoot}={}){
+export async function prepareJob(raw,{root=defaultRoot,batchId}={}){
   const platform=platformId(raw);
   if(platform!=='sph'&&raw.shortTitle)throw Error('该平台不使用视频号短标题');
   const input={platform,phone:String(raw.phone||'').trim(),video:path.resolve(raw.video||'.'),title:String(raw.title||'').trim(),description:String(raw.description||'').trim(),mode:raw.mode??'draft',visibility:raw.visibility??(platform==='dy'?'private':'unknown'),creativeStatement:raw.creativeStatement??'none',...(platform==='sph'?{shortTitle:String(raw.shortTitle||'').trim()}:{})};
+  if(batchId)input.batchId=localId(batchId);
   validatePlatformInput(input);
   if(!input.phone||!input.title||!raw.video) throw Error('需要账号、视频路径和标题');
   if([...input.title].length>30) throw Error('标题最多 30 个字');
@@ -64,7 +67,7 @@ export async function prepareJob(raw,{root=defaultRoot}={}){
 function unchangedRecord(job){
   if(digest({input:job.input,files:job.files})!==job.inputDigest) throw Error('任务内容发生变化，请重新准备');
 }
-async function unchanged(job){
+export async function assertJobUnchanged(job){
   unchangedRecord(job);
   for(const label of ['video','cover']){
     const actual=await fingerprint(job.files[label].path,label==='video'?'视频':'封面');
@@ -91,13 +94,14 @@ async function verifyInside(job,engine,root){
   else job.state='unknown';
   await save(job,root);return job;
 }
-export async function runJob(id,{root=defaultRoot,engine}={}){
+export async function runJob(id,{root=defaultRoot,engine,authorization}={}){
   if(!engine) throw Error('缺少执行引擎');
   return withEngineLock(root,async()=>{
     throwIfCancelled();
     const job=await readJob(id,{root});
+    await assertBatchChild(job,{root,authorization});
     if(job.state!=='prepared') {if(job.state==='running'){job.state='unknown';job.message='上次运行中断，请先回查，禁止重发';await save(job,root);}return job;}
-    await unchanged(job);
+    await assertJobUnchanged(job);
     assertPlatformExecution(job.input);
     throwIfCancelled();
     job.state='running';job.startedAt=Date.now();await save(job,root);
@@ -117,5 +121,5 @@ export async function runJob(id,{root=defaultRoot,engine}={}){
   });
 }
 export async function verifyJob(id,{root=defaultRoot,engine}={}){
-  return withEngineLock(root,async()=>{const job=await readJob(id,{root});if(!job.startedAt) throw Error('任务尚未执行');unchangedRecord(job);validatePlatformInput(job.input);try{return await verifyInside(job,engine,root);}catch(e){job.state='unknown';job.message=e.message;job.checkedAt=Date.now();await save(job,root);return job;}});
+  return withEngineLock(root,async()=>{const job=await readJob(id,{root});if(!job.startedAt) throw Error('任务尚未执行');await assertBatchChild(job,{root,verification:true});unchangedRecord(job);validatePlatformInput(job.input);try{return await verifyInside(job,engine,root);}catch(e){job.state='unknown';job.message=e.message;job.checkedAt=Date.now();await save(job,root);return job;}});
 }

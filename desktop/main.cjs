@@ -1,6 +1,6 @@
 const {app,BrowserWindow,Menu,ipcMain,dialog,shell,protocol,net}=require('electron');
 const fs=require('node:fs');const fsp=require('node:fs/promises');const path=require('node:path');const {pathToFileURL}=require('node:url');
-const {createWorkerClient}=require('./worker-client.cjs');const {createMediaRegistry,executionAllowed,platformUrlAllowed,installMediaProtocol}=require('./ipc-policy.cjs');
+const {createWorkerClient}=require('./worker-client.cjs');const {createMediaRegistry,executionAllowed,batchExecutionAllowed,platformUrlAllowed,installMediaProtocol}=require('./ipc-policy.cjs');
 protocol.registerSchemesAsPrivileged([{scheme:'app-media',privileges:{standard:true,secure:true,stream:true,supportFetchAPI:true}}]);
 app.setName('内容运营助手');app.setPath('userData',path.join(app.getPath('appData'),'content-ops-desktop'));
 let config;try{config=JSON.parse(fs.readFileSync(path.join(__dirname,'../desktop-config.json'),'utf8'));}catch{config={projectRoot:path.resolve(__dirname,'..')};}
@@ -9,7 +9,7 @@ const node=config.node||path.join(projectRoot,'.validation/toolchain/node-v20.20
 const indexFile=path.join(__dirname,'ui/index.html'),indexUrl=pathToFileURL(indexFile).toString();
 const media=createMediaRegistry(),selected=new Set();let window,worker,quitting=false,stopping=false,restartPromise=null,quitPromise=null;
 const uiError=error=>({error:error.message||'操作未完成，请稍后重试'});
-async function enrichJob(job){const view={...job};for(const [field,url]of[['videoPath','videoUrl'],['coverPath','coverUrl'],['screenshotPath','screenshotUrl']])if(view[field])try{view[url]=await media.issue(view[field]);}catch{}return view;}
+async function enrichJob(job){const view={...job};if(Array.isArray(view.jobs))view.jobs=await Promise.all(view.jobs.map(enrichJob));for(const [field,url]of[['videoPath','videoUrl'],['coverPath','coverUrl'],['screenshotPath','screenshotUrl']])if(view[field])try{view[url]=await media.issue(view[field]);}catch{}return view;}
 async function enrich(data){
   if(!data||typeof data!=='object')return data;const value={...data};
   if(Array.isArray(value.jobs))value.jobs=await Promise.all(value.jobs.map(enrichJob));
@@ -36,9 +36,18 @@ ipcMain.handle('desktop:request',async(event,method,args={})=>{
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('操作参数无效');
     if(quitting||restartPromise&&method!=='stop')throw Error('正在停止后台操作，请稍候');
     if(method==='chooseVideo')return choose('video');if(method==='chooseCover')return choose('cover');
-    if(method==='prepare'){
+    if(method==='prepare'||method==='prepareBatch'){
       if(!selected.has(args.input?.video)||args.input?.cover&&!selected.has(args.input.cover))throw Error('请通过文件选择器选择素材');
       return enrich(await worker.request(method,args));
+    }
+    if(method==='executeBatch'){
+      const batch=await worker.request('getBatch',{id:args.id});
+      if(!batch.canExecute)throw Error('该批次没有可执行的未开始任务');if(batch.needsVerification)throw Error('请先回查待核实的平台，再继续其他未开始平台');
+      const rows=batch.jobs.map(job=>`${job.platformName} / ${job.phone}：${batch.targetIds.includes(job.id)?'本次保存草稿':job.blockedReason||job.statusLabel}`).join('\n');
+      const answer=await dialog.showMessageBox(window,{type:'question',title:'确认多平台草稿',message:batch.attempt?'继续尚未开始的平台？':'确认保存多平台草稿？',detail:`人员：${batch.person.name}\n标题：${batch.title}\n\n${rows}\n\n本次执行 ${batch.targetIds.length} 个平台，依次保存草稿，不发表作品。${batch.requiresUnknownConfirmation?'原待核实结果继续保留，不会重新上传。':''}`,buttons:['取消','确认保存草稿'],defaultId:0,cancelId:0,noLink:true});
+      if(answer.response!==1)return {canceled:true};const approval={id:batch.id,digest:batch.digest,attempt:batch.attempt,targetIds:batch.targetIds,confirmed:true,allowUnknown:batch.requiresUnknownConfirmation};
+      if(!batchExecutionAllowed(batch,approval))throw Error('批次确认信息无效，请重新查看');
+      return worker.request('executeBatch',{id:batch.id,expectedDigest:batch.digest,expectedAttempt:batch.attempt,targetIds:batch.targetIds,allowUnknown:approval.allowUnknown});
     }
     if(method==='execute'){
       const job=await worker.request('getJob',{id:args.id});let approval=null;
@@ -65,7 +74,7 @@ ipcMain.handle('desktop:request',async(event,method,args={})=>{
       })().finally(()=>{restartPromise=null;});
       return await restartPromise;
     }
-    if(['dashboard','refresh','getJob','verify','login'].includes(method))return enrich(await worker.request(method,args));
+    if(['dashboard','refresh','getJob','getBatch','peopleSave','verify','login'].includes(method))return enrich(await worker.request(method,args));
     throw Error('不支持这项操作');
   }catch(error){return uiError(error);}
 });

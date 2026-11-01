@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import {spawnSync} from 'node:child_process';
 const uuid='e7352393-0cae-5025-be7f-3a732201a507';
 async function fixture(t){
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'desktop-service-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
@@ -91,4 +92,31 @@ test('xhs account connection and preparation preserve a closed execution gate',a
 test('an old xhs record pointing to another partition blocks login before any engine action',async t=>{
   const {root}=await fixture(t),documentsDir=path.join(root,'Documents'),dir=path.join(documentsDir,'MatrixMedia/data/account');await fs.mkdir(dir,{recursive:true});await fs.writeFile(path.join(dir,'old.json'),JSON.stringify([{phone:'品牌A',pt:'小红书',partition:'persist:品牌B小红书'}]));const {createDesktopService}=await api();let called=false;const service=createDesktopService({root,documentsDir,engine:{login:async()=>{called=true;}}});
   await assert.rejects(service.handle('login',{platform:'xhs',phone:'品牌A'}),/分区|账号记录/);assert.equal(called,false);
+});
+
+test('desktop people and batch requests show one parent, require exact fresh confirmation and preserve closed gates',async t=>{
+ const {root}=await fixture(t);const video=path.join(root,'合成.mp4');assert.equal(spawnSync('/opt/homebrew/bin/ffmpeg',['-v','error','-f','lavfi','-i','color=blue:s=160x90:d=0.2','-c:v','libx264','-pix_fmt','yuv420p',video]).status,0);
+ const {createDesktopService}=await api();const accounts=['dy','sph','xhs'].map(platform=>({platform,phone:'本机示例',loggedIn:true}));const calls=[];
+ const engine={accounts:async()=>accounts,publish:async job=>{calls.push(job.input.platform);return {resultStatus:'draft',draftEvidence:{ok:true}};},queryDraft:async job=>({ok:true,evidence:{ok:true,preserved:true,platform:job.input.platform,clientTaskId:job.id}})};
+ const service=createDesktopService({root,engine,doctor:async()=>({ok:true})});await service.handle('refresh');await service.waitForIdle();
+ const person=await service.handle('peopleSave',{person:{name:'人员示例',bindings:Object.fromEntries(accounts.map(a=>[a.platform,{platform:a.platform,phone:a.phone}]))}});
+ const batch=await service.handle('prepareBatch',{input:{personId:person.id,platforms:['dy','sph','xhs'],title:'示例',video}});
+ const data=await service.handle('dashboard');assert.equal(data.people.length,1);assert.equal(data.jobs.filter(j=>j.kind==='batch').length,1);assert.equal(data.jobs.length,2);
+ await assert.rejects(service.handle('execute',{id:batch.jobs[0].id,expectedDigest:batch.jobs[0].inputDigest}),/批次/);
+ await assert.rejects(service.handle('executeBatch',{id:batch.id,expectedDigest:'stale',expectedAttempt:0,targetIds:batch.targetIds}),/变化|确认/);
+ await service.handle('executeBatch',{id:batch.id,expectedDigest:batch.digest,expectedAttempt:batch.attempt,targetIds:batch.targetIds});await service.waitForIdle();
+ assert.deepEqual(calls,['dy','sph']);assert.equal((await service.handle('getBatch',{id:batch.id})).state,'partial');
+});
+
+test('preparing batches reserves the service and offline accounts block the entire execution before upload',async t=>{
+ const {root}=await fixture(t);const {createDesktopService}=await api();let release;const gate=new Promise(r=>release=r);let invoked;const began=new Promise(r=>invoked=r);
+ const accounts=[{platform:'dy',phone:'本机示例',loggedIn:true}];const {prepareJob}=await import('../src/jobs.mjs');
+ const video=path.join(root,'合成.mp4');assert.equal(spawnSync('/opt/homebrew/bin/ffmpeg',['-v','error','-f','lavfi','-i','color=blue:s=160x90:d=0.2','-c:v','libx264','-pix_fmt','yuv420p',video]).status,0);
+ let uploads=0;const service=createDesktopService({root,engine:{accounts:async()=>accounts,publish:async()=>{uploads++;}},doctor:async()=>({ok:true}),prepare:async(...args)=>{invoked();await gate;return prepareJob(...args);}});
+ await service.handle('refresh');await service.waitForIdle();const person=await service.handle('peopleSave',{person:{name:'人员示例',bindings:{dy:{platform:'dy',phone:'本机示例'}}}});
+ const preparing=service.handle('prepareBatch',{input:{personId:person.id,platforms:['dy'],title:'测试',video}});await began;
+ try{await assert.rejects(service.handle('peopleSave',{person:{name:'另一人',bindings:{}}}),/正在/);}finally{release();}
+ const batch=await preparing;accounts[0].loggedIn=null;
+ await service.handle('executeBatch',{id:batch.id,expectedDigest:batch.digest,expectedAttempt:batch.attempt,targetIds:batch.targetIds});await service.waitForIdle();
+ assert.equal(uploads,0);assert.match((await service.handle('getBatch',{id:batch.id})).message,/连接状态/);
 });

@@ -7,6 +7,7 @@ function createMediaRegistry(){
   };
 }
 function executionAllowed(job,approval){
+  if(job.batchId)return false;
   if(job.state!=='prepared')return false;
   const platform=job.platform===undefined?'dy':job.platform;
   if(platform==='sph')return job.mode==='draft'&&job.visibility==='unknown';
@@ -14,9 +15,12 @@ function executionAllowed(job,approval){
   if(job.mode==='draft')return true;
   return job.mode==='publish'&&approval?.confirmed===true&&approval.id===job.id&&approval.digest===job.inputDigest;
 }
+function batchExecutionAllowed(batch,approval){
+  return batch?.kind==='batch'&&batch.mode==='draft'&&batch.canExecute===true&&!batch.needsVerification&&approval?.confirmed===true&&approval.id===batch.id&&approval.digest===batch.digest&&approval.attempt===batch.attempt&&Array.isArray(batch.targetIds)&&batch.targetIds.length>0&&JSON.stringify(batch.targetIds)===JSON.stringify(approval.targetIds)&&(!batch.requiresUnknownConfirmation||approval.allowUnknown===true);
+}
 function platformUrlAllowed(value,platform='dy'){try{const url=new URL(value),hosts={dy:['creator.douyin.com','www.douyin.com','douyin.com'],sph:['channels.weixin.qq.com'],xhs:['creator.xiaohongshu.com']};return url.protocol==='https:'&&!!hosts[platform]?.includes(url.hostname)&&!url.username&&!url.password;}catch{return false;}}
 function installMediaProtocol(protocol,registry){
   const installed=protocol.registerFileProtocol('app-media',(request,callback)=>{const file=registry.resolve(request.url);callback(file?{path:file}:{error:-6});});
   if(!installed)throw Error('无法启用本机媒体预览');
 }
-module.exports={createMediaRegistry,executionAllowed,platformUrlAllowed,installMediaProtocol};
+module.exports={createMediaRegistry,executionAllowed,batchExecutionAllowed,platformUrlAllowed,installMediaProtocol};
