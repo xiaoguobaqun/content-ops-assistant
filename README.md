@@ -6,7 +6,7 @@
 
 ## GitHub备份与下载
 
-源码与安装包：[`xiaoguobaqun/content-ops-assistant`](https://github.com/xiaoguobaqun/content-ops-assistant)。发布的是净化源码快照，包含展开的引擎代码，不包含本机 Git 历史、账号、素材或运行资料。Windows 安装包、源码及 SHA-256 校验见 [GitHub Releases](https://github.com/xiaoguobaqun/content-ops-assistant/releases)。Mac 本机应用包不上传。
+源码：[`xiaoguobaqun/content-ops-assistant`](https://github.com/xiaoguobaqun/content-ops-assistant)。上传的是净化源码快照，包含展开的引擎代码，不包含本机 Git 历史、账号、素材或运行资料。本次只交付源码和 Windows 基础适配，暂不分发 Windows 安装包；Mac 本机应用包不上传。
 
 ## 按人员批量准备草稿（0.4.0）
 
@@ -31,11 +31,11 @@
 
 本轮画像分析和三家接口仅用合成客户、模拟加密和模拟响应验证，未使用真实密钥或向AI发送真实客户资料。配置完成后，点击分析会把预览材料发往所选AI服务。画像、样本、接口配置位于被Git忽略的`.local/`，不进入源码包或应用包。0.6.0 同步画像、登录、账号移除和易用性改进，并增加 Windows 安装构建。
 
-## Windows 安装（0.6.0）
+## Windows 基础适配（0.6.0）
 
-面向 Windows 10/11 x64，下载发行页中的 `Content-Ops-Assistant-<版本>-win-x64-setup.exe`，按中文向导安装，再双击桌面入口。自带运行时、引擎和媒体工具，无需另装开发工具或手动打开 Electron。升级及卸载保留用户资料。安装器未配置商业签名证书，附源码和 SHA-256。详见 [Windows 安装与开发说明](docs/windows-porting.md)。
+面向 Windows 10/11 x64，保留原生任务保护、独立资料目录、运行时适配和安装构建脚本，供后续验证与开发。本次不发布安装包，自动流程只上传源码、校验值和离线验证结果，已关闭自动安装包发布。详见 [Windows 适配与开发说明](docs/windows-porting.md)。
 
-Windows CI 验证离线回归和隔离安装/启动/退出/卸载；真实账号登录和平台发布仍需单独实机验收，不由构建结果推断。
+Windows 已有一轮原生保护 14/14、根测试 232/232 和引擎离线检查通过，隔离安装/启动/退出/卸载也曾通过。后续默认 CI 只验证源码与引擎构建。Windows 真实账号登录、视频上传和平台发布仍未实机验收，不能据此保证视频发布成功。
 
 ## 桌面使用
 

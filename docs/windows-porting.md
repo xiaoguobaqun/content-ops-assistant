@@ -1,8 +1,8 @@
-# Windows 安装与开发
+# Windows 基础适配与开发
 
-目标系统为 Windows 10/11 x64。下载页面为 [GitHub Releases](https://github.com/xiaoguobaqun/content-ops-assistant/releases)。选择 `Content-Ops-Assistant-<版本>-win-x64-setup.exe`，按中文向导选择安装目录；安装完成后从桌面或开始菜单打开“内容运营助手”。
+目标系统为 Windows 10/11 x64。本次只向 GitHub 交付净化源码及基础适配，暂不分发 Windows 安装包。安装构建和隔离验证脚本保留在源码中，默认自动流程不构建、上传安装包或创建 Release。
 
-安装包包含 Node 20、Electron、发布引擎、ffmpeg/ffprobe 和 Windows 原生任务保护程序，不需要另装 Node、Python、Git 或手动启动 Electron。安装器未配置商业代码签名证书；下载前可核对同一发行版的 SHA256SUMS.txt 与源码包。
+保留的安装构建脚本可打包 Node 20、Electron、发布引擎、ffmpeg/ffprobe 和 Windows 原生任务保护程序，目标是让安装后的用户无需另装开发工具。安装器未配置商业代码签名证书；未来分发前仍需核对实际使用和验收范围。
 
 ## 数据、升级和卸载
 
@@ -24,7 +24,9 @@ Windows 使用独占文件句柄和 Job Object 管理引擎进程树；先将挂
 - 多平台入口只存草稿；真实账号自动采样继续禁用。
 - 自主填写画像可使用；真实 AI 请求需要用户自行配置文字服务。
 
-GitHub Actions 的离线回归、安装/启动/退出/卸载检查不等于真实平台发布验收。Windows 上平台页面、扫码及风控仍需实机验证；本轮适配不自动操作真实账号或作品。
+提交 `a4def1f` 的 Windows 自动验证已通过：原生保护 14/14、根测试 232/232、8 项引擎离线脚本、引擎及安装构建，以及中文空格路径下的隔离安装、启动、退出和卸载；资料保留检查通过。该轮曾生成临时构建验证产物，未创建安装包 Release。按当前交付要求，后续默认流程只保留源码与离线结果。
+
+这些结果不等于真实平台发布验收。Windows 上平台页面、扫码、视频上传及风控仍需实机验证；本轮适配不自动操作真实账号或作品，也不能保证真实视频上传成功。
 
 ## 从源码构建
 
@@ -40,10 +42,17 @@ node scripts/build-windows.mjs --prepare-tools
 # 浏览器夹具可通过 CONTENT_OPS_CHROME 指向 Chrome。
 node scripts/run-tests.mjs
 node scripts/build-engine.mjs
+```
+
+开发启动：`node scripts/start-desktop.mjs`。默认 CI 在原生 Windows runner 编译保护程序、执行全套根测试和相关引擎离线测试、构建引擎，然后仅归档源码 ZIP、SHA-256 和离线结果。源码上传、离线检查与平台视频上传各自核对。
+
+以下安装构建仅供开发者在隔离环境中手动验证，本次不对外分发：
+
+```powershell
 node scripts/build-windows.mjs
 node scripts/windows-smoke.mjs
 ```
 
-开发启动：`node scripts/start-desktop.mjs`。CI 在原生 Windows runner 编译保护程序并执行全套根测试和相关引擎离线测试，成功后构建 NSIS 安装器，在中文空格路径安装、用隔离资料目录启动、退出并卸载，核对资料保留。产物包含安装包、源码和 SHA-256；任何必需检查失败均不发布安装包。
+隔离验证会在中文空格路径安装、用隔离资料目录启动、退出并卸载，核对资料保留。它不登录真实账号，也不发表视频。
 
 源码及 MatrixMedia 修改遵循 GPL-2.0-only；媒体工具为独立 GPL 程序，安装包附对应许可证及来源说明。勿上传私人素材、客户档案、任务记录、日志、登录态或接口密钥。

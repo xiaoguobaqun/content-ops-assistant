@@ -1,4 +1,4 @@
-name: Windows installer
+name: Windows source verification
 
 on:
   push:
@@ -9,11 +9,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-installer-${{ github.ref }}
+  group: windows-source-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build:
+  verify:
     runs-on: windows-2022
     timeout-minutes: 45
     env:
@@ -66,37 +66,29 @@ jobs:
             node "scripts/$test"
             if ($LASTEXITCODE -ne 0) { throw "Engine regression failed: $test" }
           }
-      - name: Build engine and complete self-contained installer
+      - name: Build engine
         run: |
           node scripts/build-engine.mjs
           if ($LASTEXITCODE -ne 0) { throw 'Engine build failed' }
-          node scripts/build-windows.mjs
-          if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
-      - name: Install in Unicode path, launch, quit and uninstall with data preserved
-        run: node scripts/windows-smoke.mjs
-      - name: Package corresponding application source and checksums
+      - name: Archive verified source and checksum
         shell: pwsh
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           git archive --format=zip --prefix=content-ops-assistant/ --output="dist/Content-Ops-Assistant-$version-source.zip" HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Source export failed' }
-          $files = Get-ChildItem dist -File | Where-Object { $_.Name -match '^Content-Ops-Assistant-.*(setup\.exe|source\.zip)$' }
-          $lines = foreach ($file in $files) { "$( (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() )  $($file.Name)" }
-          $lines | Out-File dist/SHA256SUMS.txt -Encoding ascii
-          @('Windows 10/11 x64 installer.', 'Offline regression and isolated install/start/quit/uninstall checks passed.', 'No real platform login, upload, draft or publishing acceptance was performed.', 'Unsigned installer; source and SHA-256 checksums are included.') | Out-File dist/RELEASE-NOTES.txt -Encoding utf8
-      - name: Upload installer, source and verification evidence
+          $source = Get-Item "dist/Content-Ops-Assistant-$version-source.zip"
+          "$( (Get-FileHash $source.FullName -Algorithm SHA256).Hash.ToLowerInvariant() )  $($source.Name)" | Out-File dist/SHA256SUMS.txt -Encoding ascii
+          @('Windows source foundation only; no installer is distributed.', 'Native protection, root and engine offline checks and engine build passed.', 'Real Windows platform login, video upload, draft and publishing have not been accepted.') | Out-File dist/VERIFICATION.txt -Encoding utf8
+      - name: Upload source and offline verification evidence
         uses: actions/upload-artifact@v4
         with:
-          name: content-ops-windows-x64
+          name: content-ops-windows-source
           if-no-files-found: error
           retention-days: 30
           path: |
-            dist/Content-Ops-Assistant-*-win-x64-setup.exe
-            dist/Content-Ops-Assistant-*-win-x64-setup.exe.sha256
             dist/Content-Ops-Assistant-*-source.zip
             dist/SHA256SUMS.txt
-            dist/RELEASE-NOTES.txt
-            dist/windows-smoke.json
+            dist/VERIFICATION.txt
             dist/windows-root-tests.txt
       - name: Retain failure diagnostics
         if: failure()
@@ -106,47 +98,4 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
           path: |
-            dist/windows-smoke.json
             dist/windows-root-tests.txt
-
-  publish:
-    needs: build
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: content-ops-windows-x64
-          path: release
-      - name: Publish verified assets without replacing existing release files
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          SOURCE_SHA: ${{ github.sha }}
-          RUN_NUMBER: ${{ github.run_number }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd release
-          sha256sum --check SHA256SUMS.txt
-          installer=(Content-Ops-Assistant-*-win-x64-setup.exe)
-          version="${installer[0]#Content-Ops-Assistant-}"
-          version="${version%-win-x64-setup.exe}"
-          tag="v$version"
-          if gh api "repos/$GH_REPO/git/ref/tags/$tag" > tag.json 2>/dev/null; then
-            tagged_sha=$(jq -r '.object.sha' tag.json)
-            tagged_type=$(jq -r '.object.type' tag.json)
-            if [[ "$tagged_type" == tag ]]; then tagged_sha=$(gh api "repos/$GH_REPO/git/tags/$tagged_sha" --jq '.object.sha'); fi
-            if [[ "$tagged_sha" != "$SOURCE_SHA" ]]; then tag="v$version-windows.$RUN_NUMBER"; fi
-          fi
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --target "$SOURCE_SHA" --title "内容运营助手 $version · Windows x64" --notes-file RELEASE-NOTES.txt
-          fi
-          gh release view "$tag" --json assets --jq '.assets[].name' > existing-assets.txt
-          for asset in Content-Ops-Assistant-*-win-x64-setup.exe Content-Ops-Assistant-*-win-x64-setup.exe.sha256 Content-Ops-Assistant-*-source.zip SHA256SUMS.txt RELEASE-NOTES.txt windows-smoke.json windows-root-tests.txt; do
-            if ! grep -Fxq "$asset" existing-assets.txt; then gh release upload "$tag" "$asset"; fi
-          done
-          echo "Published: https://github.com/$GH_REPO/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
