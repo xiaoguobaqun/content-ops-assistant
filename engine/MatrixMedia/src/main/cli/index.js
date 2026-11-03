@@ -38,6 +38,13 @@ import {parseSphDraftArgs} from './parseSphDraftArgs.js';
 import {querySphDraft} from '../services/sphDraft.js';
 import {parseXhsDraftArgs} from './parseXhsDraftArgs.js';
 import {queryXhsDraft} from '../services/xhsDraft.js';
+import {parseXhsCompletionArgs} from './parseXhsCompletionArgs.js';
+import {completeXhsDraft} from '../services/xhsCompletion.js';
+import { parseProfileSampleArgs, profileSampleHelpText } from './parseProfileSampleArgs.js';
+import { profileSampleCapabilities, sampleProfile } from '../services/profileSample.js';
+import {parseAccountRemoveArgs,accountRemoveHelpText} from './parseAccountRemoveArgs.js';
+import {createAccountRemoval} from '../services/accountRemoval.js';
+import {app,session} from 'electron';
 
 export {
   isCliMode,
@@ -533,6 +540,28 @@ export async function runCliMain(argv = process.argv) {
   }
 
   const cmd = sub[0];
+  if(cmd==='account-remove'){
+    const parsed=parseAccountRemoveArgs(sub.slice(1));if(!parsed.ok){console.error(parsed.error);return 2;}
+    if(parsed.value.help){console.log(accountRemoveHelpText());return 0;}
+    try{
+      const removal=createAccountRemoval({accountsDir:path.join(app.getPath('documents'),'MatrixMedia/data/account'),backupDir:path.join(app.getPath('userData'),'sph-login-backup'),profileRoot:app.getPath('userData'),sessionForPartition:partition=>session.fromPartition(partition)});
+      const result=await removal[parsed.value.preview?'preview':'remove'](parsed.value);console.log(JSON.stringify({channel:'account-remove',...result}));return 0;
+    }catch(error){console.log(JSON.stringify({channel:'account-remove',ok:false,message:error.message}));return 4;}
+  }
+  if (cmd === 'profile-sample') {
+    const parsed = parseProfileSampleArgs(sub.slice(1));
+    if (!parsed.ok) { console.error(parsed.error); return 2; }
+    if (parsed.value.help) { console.log(profileSampleHelpText()); return 0; }
+    if (parsed.value.capabilities) { console.log(JSON.stringify(profileSampleCapabilities())); return 0; }
+    const result = await sampleProfile(parsed.value);
+    console.log(JSON.stringify(result));
+    return result.ok ? 0 : 4;
+  }
+  if(cmd==='xhs-complete-draft'){
+    const parsed=parseXhsCompletionArgs(sub.slice(1));if(!parsed.ok){console.error(parsed.error);return 2;}
+    if(parsed.value.help){console.log('用法: cli xhs-complete-draft --phone <账号> --expected-file <绝对授权JSON路径> [--screenshot <图片路径>]；仅补全唯一匹配的原草稿，不上传视频、不删除、不发表；保存后仍须独立核验');return 0;}
+    try{const expected=JSON.parse(fs.readFileSync(parsed.value.expectedFile,'utf8'));const result=await completeXhsDraft({...parsed.value,expected});console.log(JSON.stringify({channel:'xhs-completion',...result}));return result.ok?0:4;}catch(e){console.log(JSON.stringify({channel:'xhs-completion',ok:false,message:e.message}));return 4;}
+  }
   if(cmd==='xhs-draft'){
     const parsed=parseXhsDraftArgs(sub.slice(1));if(!parsed.ok){console.error(parsed.error);return 2;}if(parsed.value.help){console.log('用法: cli xhs-draft --phone <账号> (--expected-file <绝对JSON路径> | --inspect | --inspect-create | --inspect-drafts) [--screenshot <绝对路径>]；只读核验，不上传、补写、暂存或发表');return 0;}
     try{const expected=parsed.value.expectedFile?JSON.parse(fs.readFileSync(parsed.value.expectedFile,'utf8')):undefined;const result=await queryXhsDraft({...parsed.value,expected});console.log(JSON.stringify({channel:'xhs-draft',...result}));return result.ok?0:4;}catch(e){console.log(JSON.stringify({channel:'xhs-draft',ok:false,message:e.message}));return 4;}
@@ -988,7 +1017,7 @@ export async function runCliMain(argv = process.argv) {
 
   if (cmd === "--help" || cmd === "-h") {
     console.log(
-      "可用子命令: publish | publish-article | login | accounts | history | stats | stats-sync | stats-work"
+      "可用子命令: publish | publish-article | login | accounts | account-remove | history | stats | stats-sync | stats-work | profile-sample"
     );
     console.log("各自 --help 查看详细参数。");
     return 0;

@@ -7,6 +7,7 @@ function createMediaRegistry(){
   };
 }
 function executionAllowed(job,approval){
+  if(job.trashedAt)return false;
   if(job.batchId)return false;
   if(job.state!=='prepared')return false;
   const platform=job.platform===undefined?'dy':job.platform;

@@ -1,14 +1,29 @@
-const {app,BrowserWindow,Menu,ipcMain,dialog,shell,protocol,net}=require('electron');
+const {app,BrowserWindow,Menu,ipcMain,dialog,shell,protocol,net,safeStorage}=require('electron');
 const fs=require('node:fs');const fsp=require('node:fs/promises');const path=require('node:path');const {pathToFileURL}=require('node:url');
 const {createWorkerClient}=require('./worker-client.cjs');const {createMediaRegistry,executionAllowed,batchExecutionAllowed,platformUrlAllowed,installMediaProtocol}=require('./ipc-policy.cjs');
+const {createAiSettingsStore}=require('./ai-settings.cjs');const {profileAnalysisArgs}=require('./profile-ipc.cjs');
+const {createAccountRemovalHandler}=require('./account-removal.cjs');
+const {selectVideo}=require('./video-selection.cjs');
+const {desktopRuntime}=require('./runtime-config.cjs');
 protocol.registerSchemesAsPrivileged([{scheme:'app-media',privileges:{standard:true,secure:true,stream:true,supportFetchAPI:true}}]);
-app.setName('内容运营助手');app.setPath('userData',path.join(app.getPath('appData'),'content-ops-desktop'));
+app.setName('内容运营助手');
+const userDataPath=process.env.CONTENT_OPS_DATA_ROOT?path.join(process.env.CONTENT_OPS_DATA_ROOT,'ui-profile'):path.join(app.getPath('appData'),'content-ops-desktop');
+fs.mkdirSync(userDataPath,{recursive:true,mode:0o700});app.setPath('userData',userDataPath);
 let config;try{config=JSON.parse(fs.readFileSync(path.join(__dirname,'../desktop-config.json'),'utf8'));}catch{config={projectRoot:path.resolve(__dirname,'..')};}
-const projectRoot=config.projectRoot;
-const node=config.node||path.join(projectRoot,'.validation/toolchain/node-v20.20.2-darwin-arm64/bin/node');
+const runtime=desktopRuntime({config,appRoot:path.resolve(__dirname,'..'),userDataPath:app.getPath('userData'),documentsPath:app.getPath('documents')});
+const {projectRoot,dataRoot,node}=runtime;
+process.env.CONTENT_OPS_DATA_ROOT=dataRoot;
+if(runtime.engineUserData)process.env.CONTENT_OPS_ENGINE_USER_DATA=runtime.engineUserData;
+if(runtime.documentsPath)process.env.CONTENT_OPS_DOCUMENTS=runtime.documentsPath;
+const aiSettings=createAiSettingsStore({filePath:path.join(dataRoot,'ai-providers.json'),safeStorage});
 const indexFile=path.join(__dirname,'ui/index.html'),indexUrl=pathToFileURL(indexFile).toString();
-const media=createMediaRegistry(),selected=new Set();let window,worker,quitting=false,stopping=false,restartPromise=null,quitPromise=null;
+const media=createMediaRegistry(),selected=new Set();let window,worker,quitting=false,stopping=false,restartPromise=null,quitPromise=null,unsavedChanges=false;
 const uiError=error=>({error:error.message||'操作未完成，请稍后重试'});
+const removeAccount=createAccountRemovalHandler({request:(method,args)=>worker.request(method,args),confirm:async preview=>{
+  const platformName={dy:'抖音',sph:'微信视频号',xhs:'小红书'}[preview.platform];
+  const answer=await dialog.showMessageBox(window,{type:'warning',title:'移除账号并退出登录',message:'移除这个账号并退出此应用的登录？',detail:`平台：${platformName}\n账号：${preview.phone}\n\n尚未执行的旧任务将作废，重新连接后需重新准备。\n历史记录、人员画像、素材和草稿存储保留。\n不影响手机或日常浏览器的登录状态。`,buttons:['取消','移除并退出登录'],defaultId:0,cancelId:0,noLink:true});
+  return answer.response===1;
+}});
 async function enrichJob(job){const view={...job};if(Array.isArray(view.jobs))view.jobs=await Promise.all(view.jobs.map(enrichJob));for(const [field,url]of[['videoPath','videoUrl'],['coverPath','coverUrl'],['screenshotPath','screenshotUrl']])if(view[field])try{view[url]=await media.issue(view[field]);}catch{}return view;}
 async function enrich(data){
   if(!data||typeof data!=='object')return data;const value={...data};
@@ -21,20 +36,36 @@ async function enrich(data){
 async function send(event,source=worker){const data=await enrich(event);if(source===worker&&!quitting&&!stopping&&window&&!window.isDestroyed())window.webContents.send('desktop:update',data);}
 function startWorker(){
   if(quitting)return;
-  const client=createWorkerClient({node,projectRoot,documentsPath:app.getPath('documents'),onEvent:event=>{if(client===worker&&!quitting&&!stopping)send(event,client);},onExit:()=>{if(client===worker&&!quitting&&!stopping)send({type:'service-exit',message:'后台服务已停止，请重新打开应用。未完成的任务请先回查。'},client);}});
+  const client=createWorkerClient({...runtime,node,projectRoot,onEvent:event=>{if(client===worker&&!quitting&&!stopping)send(event,client);},onExit:()=>{if(client===worker&&!quitting&&!stopping)send({type:'service-exit',message:'后台服务已停止，请重新打开应用。未完成的任务请先回查。'},client);}});
   worker=client;
 }
 function trusted(event){return window&&!window.isDestroyed()&&event.sender===window.webContents&&event.senderFrame===window.webContents.mainFrame&&event.senderFrame.url===indexUrl;}
 async function choose(kind){
   const video=kind==='video';const result=await dialog.showOpenDialog(window,{title:video?'选择要发布的视频':'选择封面图片',properties:['openFile'],filters:[{name:video?'视频文件':'封面图片',extensions:video?['mp4','mov','m4v','mkv','avi','webm']:['jpg','jpeg','png','webp']}]});
   if(result.canceled||!result.filePaths.length)return null;
+  if(video)return selectVideo(result.filePaths,{selected,media});
   const file=await fsp.realpath(result.filePaths[0]);selected.add(file);const stat=await fsp.stat(file);return {path:file,name:path.basename(file),size:stat.size,url:await media.issue(file)};
 }
+ipcMain.handle('desktop:drop-video',async(event,args)=>{
+  if(!trusted(event)||quitting||stopping)return {error:'页面未获得素材操作权限'};
+  try{const video=await selectVideo(args?.paths,{selected,media});if(window&&!window.isDestroyed())window.webContents.send('desktop:update',{type:'videoSelected',video});return {ok:true};}
+  catch(error){const result=uiError(error);if(window&&!window.isDestroyed())window.webContents.send('desktop:update',{type:'videoDropError',message:result.error});return result;}
+});
 ipcMain.handle('desktop:request',async(event,method,args={})=>{
   try{
     if(!trusted(event))throw Error('页面未获得操作权限');
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('操作参数无效');
     if(quitting||restartPromise&&method!=='stop')throw Error('正在停止后台操作，请稍候');
+    if(method==='setUnsaved'){if(typeof args.hasChanges!=='boolean')throw Error('未保存状态无效');unsavedChanges=args.hasChanges;return {ok:true};}
+    if(method==='removeAccount')return await removeAccount(args);
+    if(method==='trashTask'){
+      const record=await worker.request(args.kind==='batch'?'getBatch':'getJob',{id:args.id});
+      const answer=await dialog.showMessageBox(window,{type:'question',title:'移到回收站',message:'将这条本机任务记录移到回收站？',detail:`任务：${record.title}\n\n可在任务记录的回收站恢复。不会删除视频、平台作品或草稿，执行证据保留。`,buttons:['取消','移到回收站'],defaultId:0,cancelId:0,noLink:true});
+      return answer.response===1?worker.request('trashTask',{id:record.id}):{canceled:true};
+    }
+    if(method==='aiSettingsGet')return aiSettings.list();
+    if(method==='aiSettingsSave'){if(worker?.busy)throw Error('已有操作正在执行，请等待完成');return aiSettings.save({id:args.id,baseURL:args.baseURL,model:args.model,apiKey:args.apiKey});}
+    if(method==='profileAnalyze')return worker.request(method,profileAnalysisArgs(args,aiSettings));
     if(method==='chooseVideo')return choose('video');if(method==='chooseCover')return choose('cover');
     if(method==='prepare'||method==='prepareBatch'){
       if(!selected.has(args.input?.video)||args.input?.cover&&!selected.has(args.input.cover))throw Error('请通过文件选择器选择素材');
@@ -61,8 +92,8 @@ ipcMain.handle('desktop:request',async(event,method,args={})=>{
       if(!executionAllowed(job,approval))throw Error('任务已执行或确认信息已变化，请查看任务记录');
       return worker.request('execute',{id:job.id,expectedDigest:job.inputDigest});
     }
-    if(method==='showJob'){await worker.request('getJob',{id:args.id});shell.showItemInFolder(path.join(projectRoot,'.local/jobs',args.id,'job.json'));return {ok:true};}
-    if(method==='showLogs'){const file=path.join(projectRoot,'.local/logs');await fsp.mkdir(file,{recursive:true});const error=await shell.openPath(file);if(error)throw Error(error);return {ok:true};}
+    if(method==='showJob'){await worker.request('getJob',{id:args.id});shell.showItemInFolder(path.join(dataRoot,'jobs',args.id,'job.json'));return {ok:true};}
+    if(method==='showLogs'){const file=path.join(dataRoot,'logs');await fsp.mkdir(file,{recursive:true});const error=await shell.openPath(file);if(error)throw Error(error);return {ok:true};}
     if(method==='openPlatform'){
       const job=args.id?await worker.request('getJob',{id:args.id}):null;const {getPlatform}=await import('../src/platforms.mjs');const platform=job?.platform??'dy',url=job?.platformUrl||getPlatform(platform).home;if(!platformUrlAllowed(url,platform))throw Error('平台链接无效');await shell.openExternal(url);return {ok:true};
     }
@@ -74,12 +105,12 @@ ipcMain.handle('desktop:request',async(event,method,args={})=>{
       })().finally(()=>{restartPromise=null;});
       return await restartPromise;
     }
-    if(['dashboard','refresh','getJob','getBatch','peopleSave','verify','login'].includes(method))return enrich(await worker.request(method,args));
+    if(['dashboard','refresh','getJob','getBatch','restoreTask','peopleSave','verify','login','profileGet','profileSave','profilePreview','profileCapabilities','profileCollect','profileConfirm'].includes(method))return enrich(await worker.request(method,args));
     throw Error('不支持这项操作');
   }catch(error){return uiError(error);}
 });
 function createWindow(){
-  window=new BrowserWindow({width:1380,height:940,minWidth:1000,minHeight:720,title:'内容运营助手',backgroundColor:'#F5F7F8',titleBarStyle:'hiddenInset',trafficLightPosition:{x:20,y:19},webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true}});
+  window=new BrowserWindow({width:1380,height:940,minWidth:1000,minHeight:720,title:'内容运营助手',backgroundColor:'#F5F7F8',...(process.platform==='darwin'?{titleBarStyle:'hiddenInset',trafficLightPosition:{x:20,y:19}}:{}),webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true}});
   window.webContents.setWindowOpenHandler(()=>({action:'deny'}));window.webContents.on('will-navigate',(event,url)=>{if(url!==indexUrl)event.preventDefault();});
   window.on('close',event=>{if(!quitting){event.preventDefault();window.hide();}});
   window.loadFile(indexFile);window.once('ready-to-show',()=>window.show());
@@ -91,10 +122,15 @@ if(!app.requestSingleInstanceLock())app.quit();else{
     installMediaProtocol(protocol,media);
     Menu.setApplicationMenu(Menu.buildFromTemplate([{label:'内容运营助手',submenu:[{role:'about',label:'关于内容运营助手'},{type:'separator'},{role:'hide',label:'隐藏内容运营助手'},{role:'hideOthers',label:'隐藏其他应用'},{type:'separator'},{role:'quit',label:'退出内容运营助手'}]},{label:'编辑',submenu:[{role:'undo',label:'撤销'},{role:'redo',label:'重做'},{type:'separator'},{role:'cut',label:'剪切'},{role:'copy',label:'复制'},{role:'paste',label:'粘贴'},{role:'selectAll',label:'全选'}]},{label:'窗口',submenu:[{role:'minimize',label:'最小化'},{role:'zoom',label:'缩放'},{role:'front',label:'显示窗口'}]}]));
     startWorker();createWindow();app.on('activate',()=>{if(window)window.show();});
+    if(process.env.CONTENT_OPS_SMOKE_REPORT){
+      const timer=setTimeout(()=>app.exit(2),120000);
+      try{await require('./installed-check.cjs').checkInstalledApp({window,worker,projectRoot,dataRoot,reportPath:process.env.CONTENT_OPS_SMOKE_REPORT});}
+      finally{clearTimeout(timer);await worker.stop();quitting=true;app.exit(0);}
+    }
   }).catch(error=>{dialog.showErrorBox('内容运营助手未能启动',error.message);app.exit(1);});
   app.on('before-quit',event=>{
     if(quitting)return;event.preventDefault();if(quitPromise)return;
-    quitPromise=(async()=>{if(worker?.busy&&!stopping){const answer=await dialog.showMessageBox(window,{type:'question',message:'有操作正在执行，确定退出？',detail:'退出会停止当前操作。重开应用后请先回查任务结果。',buttons:['继续运行','退出'],defaultId:0,cancelId:0});if(answer.response!==1)return;}
+    quitPromise=(async()=>{if(worker?.busy&&!stopping||unsavedChanges){const answer=await dialog.showMessageBox(window,{type:'question',message:unsavedChanges?'有内容尚未保存，确定退出？':'有操作正在执行，确定退出？',detail:`${unsavedChanges?'未保存的编辑将丢失。':''}退出会停止当前操作，画像分析不会自动重试；未完成的发布任务请先回查。`,buttons:['继续使用','退出'],defaultId:0,cancelId:0});if(answer.response!==1)return;}
       quitting=true;if(restartPromise)await restartPromise;await worker?.stop();app.exit(0);
     })().catch(error=>{quitting=false;dialog.showErrorBox('暂时无法退出',error.message);}).finally(()=>{quitPromise=null;});
   });

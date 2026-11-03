@@ -2,7 +2,7 @@
 export const platforms=Object.freeze([
   Object.freeze({id:'dy',draftVerified:true,name:'抖音',app:'抖音 App',mark:'抖',enabled:true,publish:true,titleLimit:30,descriptionLimit:1000,home:'https://creator.douyin.com/',accountUrl:'https://creator.douyin.com/creator-micro/home',validation:'草稿已实机验证；真实发布闭环待验收'}),
   Object.freeze({id:'sph',draftVerified:true,name:'微信视频号',engineName:'视频号',app:'微信',mark:'微',enabled:true,publish:false,titleLimit:30,descriptionLimit:1000,home:'https://channels.weixin.qq.com/platform/post/list',accountUrl:'https://channels.weixin.qq.com/platform',validation:'测试素材草稿已独立恢复核验并原样保留；真实发表未开放'}),
-  Object.freeze({id:'xhs',loginEnabled:true,name:'小红书',app:'小红书 App',mark:'红',enabled:true,executionEnabled:false,publish:false,titleLimit:20,descriptionLimit:1000,home:'https://creator.xiaohongshu.com/',accountUrl:'https://creator.xiaohongshu.com/new/home',validation:'本人登录已验证；本机草稿流程已完成离线开发，实机未验收，暂不可执行。现有自动草稿保留原样'}),
+  Object.freeze({id:'xhs',loginEnabled:true,name:'小红书',app:'小红书 App',mark:'红',enabled:true,executionEnabled:false,publish:false,titleLimit:20,descriptionLimit:1000,home:'https://creator.xiaohongshu.com/',accountUrl:'https://creator.xiaohongshu.com/new/home',validation:'本人登录、测试草稿补全及独立恢复保留已验证；全新任务完整流程待复验，执行暂不开放'}),
 ]);
 export function getPlatform(id='dy'){
   const platform=platforms.find(item=>item.id===id);

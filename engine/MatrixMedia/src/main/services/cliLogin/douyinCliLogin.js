@@ -15,9 +15,9 @@ import {
   normalizeDouyinPartition,
 } from "./douyinSessionUtil.js";
 import {
-  CLI_LOGIN_QR_FIRST_DELAY_MS,
   CLI_LOGIN_QR_REFRESH_MS,
 } from "./cliLoginQrRefresh.js";
+import {startLoginQrLoop,loadLoginDocument,createLoginPageRecovery} from './loginQrLoop.js';
 
 const puppeteer = addExtra(puppeteerCore);
 puppeteer.use(StealthPlugin());
@@ -92,7 +92,7 @@ export async function runDouyinCliLogin({
       if (settled) return;
       settled = true;
       if (pollTimer) clearInterval(pollTimer);
-      if (qrTimer) clearInterval(qrTimer);
+      if (qrTimer) qrTimer();
       if (deadlineTimer) clearTimeout(deadlineTimer);
 
       // 登录成功时，先将 Cookie / Storage 刷盘，再关窗口
@@ -136,6 +136,8 @@ export async function runDouyinCliLogin({
 
     const winWidth = 1100;
     const winHeight = 820;
+    // 整个初始化与扫码流程均受期限约束，不在背景资源加载完成后才开始计时。
+    deadlineTimer=setTimeout(()=>{if(!settled)finish(3,{log:'抖音登录等待超时，请检查网络后重新获取二维码。'});},timeoutMs);
 
     (async () => {
       try {
@@ -145,6 +147,7 @@ export async function runDouyinCliLogin({
         finish(1, {});
         return;
       }
+      if(settled){try{pieBrowser?.disconnect();}catch{}return;}
 
       win = new BrowserWindow({
         width: winWidth,
@@ -174,14 +177,27 @@ export async function runDouyinCliLogin({
       if (cfg.useragent) {
         win.webContents.setUserAgent(cfg.useragent);
       }
+      const recovery=createLoginPageRecovery({
+        isActive:()=>!settled,
+        reload:async()=>{
+          console.warn('抖音登录组件加载失败，正在重新加载一次；账号资料和草稿保留。');
+          await loadLoginDocument(win,null,{reload:true});
+        },
+        onFailure:()=>{
+          console.log(JSON.stringify({channel:'dy-login',ok:false,reason:'login-component-load-failed'}));
+          return finish(3,{log:'抖音登录组件重新加载后仍失败，请检查网络后重新获取二维码。'});
+        },
+      });
+      win.webContents.on('console-message',(_event,level,message)=>{if(level>=2)recovery.onConsoleMessage(message);});
 
       try {
-        await win.loadURL(cfg.index);
+        await loadLoginDocument(win,cfg.index);
       } catch (err) {
         console.error("加载抖音创作者页失败:", err);
         finish(1, {});
         return;
       }
+      if(settled)return;
 
       try {
         piePage = await pie.getPage(pieBrowser, win);
@@ -190,6 +206,7 @@ export async function runDouyinCliLogin({
         finish(1, {});
         return;
       }
+      if(settled)return;
 
       if (show) {
         win.show();
@@ -217,15 +234,7 @@ export async function runDouyinCliLogin({
         if (saveQrPngPath) {
           console.log("二维码 PNG 写入路径:", saveQrPngPath);
         }
-        qrTimer = setInterval(() => {
-          if (settled || !piePage) return;
-          paintLoginQrToTerminalFromPuppeteerPage(piePage, paintOpts).catch(() => {});
-        }, CLI_LOGIN_QR_REFRESH_MS);
-        setTimeout(() => {
-          if (!settled && piePage) {
-            paintLoginQrToTerminalFromPuppeteerPage(piePage, paintOpts).catch(() => {});
-          }
-        }, CLI_LOGIN_QR_FIRST_DELAY_MS);
+        qrTimer=startLoginQrLoop({capture:async()=>recovery.afterCapture(await paintLoginQrToTerminalFromPuppeteerPage(piePage,{...paintOpts,isActive:()=>!settled})),refreshMs:CLI_LOGIN_QR_REFRESH_MS});
       } else if (show) {
         console.log("请在浏览器窗口中完成抖音登录。partition:", part);
       }
@@ -245,14 +254,6 @@ export async function runDouyinCliLogin({
           });
       }, 2000);
 
-      deadlineTimer = setTimeout(() => {
-        if (!settled) {
-          console.error(
-            `登录等待超时（${Math.round(timeoutMs / 1000)}s），仍未检测到 passport_assist_user。`
-          );
-          finish(3, {});
-        }
-      }, timeoutMs);
     })().catch(e => {
       console.error("抖音 CLI 登录初始化失败:", e.message);
       finish(1, {});

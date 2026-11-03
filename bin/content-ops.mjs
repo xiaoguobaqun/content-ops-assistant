@@ -40,6 +40,6 @@ try{
     }
     else throw Error('未知命令；使用 --help 查看用法');
     console.log(JSON.stringify(result,null,2));
-    if(result?.state==='unknown'||result?.state==='running'||result?.ok===false||result?.complete===false)process.exitCode=4;
+    if(['unknown','running','invalidated'].includes(result?.state)||result?.ok===false||result?.complete===false)process.exitCode=4;
   }
 }catch(e){console.error(JSON.stringify({error:e.message}));process.exitCode=1;}

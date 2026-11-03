@@ -143,14 +143,14 @@ const ANIMATE_QR_DIAG_SCRIPT = `(function () {
   var cv0 = host.querySelector("canvas");
   var cv1 = sh ? host.shadowRoot.querySelector("canvas") : null;
   var el = im0 || im1;
-  var head = el ? String(el.src || "").slice(0, 56) : "";
+  var source = el ? String(el.src || "") : "";
   return {
     host: true,
     shadow: sh,
     imgInLight: !!im0,
     imgInShadow: !!im1,
     canvas: !!(cv0 || cv1),
-    srcHead: head,
+    srcKind: source.indexOf('data:image/')===0?'inline-image':source?'external-image':'empty',
   };
 })()`;
 
@@ -234,97 +234,46 @@ export async function getDouyinLoginCaptureRectFromPuppeteerPage(page) {
  * @param {import("puppeteer").Page} page
  * @param {{ partitionLabel: string, saveQrPngPath?: string | null }} opts
  */
+export async function captureVerifiedLoginQrFromPage(page,{isActive=()=>true}={}) {
+  const active=()=>isActive()&&!(typeof page.isClosed==='function'&&page.isClosed());
+  const decode=(buf,fromLoginContainer=false)=>{
+    if(!buf?.length)return null;
+    try{
+      const image=nativeImage.createFromBuffer(buf);if(image.isEmpty())return null;
+      const payload=tryDecodeQrPayloadFromNativeImage(image);if(!payload){cliQrDebugLog('图像无可解码QR',image.getSize());return null;}
+      const url=new URL(payload);
+      // 整页可能有下载/推广二维码，只接受抖音的登录扫描地址，不记录其中的凭据参数。
+      const owned=url.hostname==='douyin.com'||url.hostname.endsWith('.douyin.com')||url.hostname==='amemv.com'||url.hostname.endsWith('.amemv.com');
+      const knownPath=/(^|\/)scan_qr(?:code)?\/?$/.test(url.pathname);
+      // 当前官方动效容器也会提供amemv跳转码；这种格式必须同时有容器归属和登录token，不能从整页推广码猜测。
+      const login=url.protocol==='https:'&&!url.username&&!url.password&&owned&&(knownPath||fromLoginContainer&&url.searchParams.has('token'));
+      if(!login)cliQrDebugLog('非登录QR',{protocol:['https:','http:','snssdk1128:','douyin:'].includes(url.protocol)?url.protocol:'other',host:['sso.douyin.com','www.douyin.com','creator.douyin.com','douyin.com'].includes(url.hostname)?url.hostname:'other',path:url.pathname.split('/').map(s=>['scan_qr','scan_qrcode','passport','web','login','qrcode','auth','download'].includes(s)?s:s?'other':'').join('/')});
+      return login?image:null;
+    }catch{return null;}
+  };
+  if(!active())return null;
+  let image=decode(await tryReadAnimateQrImageBufferFromPage(page),true);
+  if(image&&active())return image;
+  const rect=await getDouyinLoginCaptureRectFromPuppeteerPage(page);
+  if(rect&&active()){
+    try{image=decode(await page.screenshot({type:'png',clip:rect}));}catch{}
+    if(image&&active())return image;
+  }
+  // 页面布局变化时从整页寻找实际二维码，但绝不把整页直接交给用户扫码。
+  if(active())try{
+    const buf=await page.screenshot({type:'png'});image=decode(buf);
+    if(!image&&cliQrDebugEnabled())cliQrDebugLog('登录页结构',await page.evaluate(`(()=>{const t=document.body?.innerText||'';return {ready:document.readyState,qrHost:!!document.getElementById('animate_qrcode_container'),qrText:/扫码|二维码/.test(t),verification:/验证码|滑块|安全验证/.test(t),consent:/我已阅读|同意/.test(t),iframes:document.querySelectorAll('iframe').length,images:document.images.length,canvases:document.querySelectorAll('canvas').length};})()`));
+  }catch{}
+  return image&&active()?image:null;
+}
+
 export async function paintLoginQrToTerminalFromPuppeteerPage(page, opts) {
-  if (!process.stdout.isTTY && !opts.saveQrPngPath) {
-    return;
-  }
-  try {
-    if (typeof page.isClosed === "function" && page.isClosed()) {
-      return;
-    }
-  } catch (_) {
-    return;
-  }
-
-  let fromBase64 = await tryReadAnimateQrImageBufferFromPage(page);
-  let buf = fromBase64;
-
-  if (!buf || !buf.length) {
-    cliQrDebugLog("将使用 CDP 截图作为二维码栅格");
-    let rect = await getDouyinLoginCaptureRectFromPuppeteerPage(page);
-    try {
-      if (rect) {
-        buf = await page.screenshot({
-          type: "png",
-          clip: {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-          },
-        });
-      } else {
-        buf = await page.screenshot({ type: "png" });
-      }
-    } catch (e) {
-      cliQrDebugLog("截图失败:", e && e.message);
-      return;
-    }
-  }
-
-  if (!buf || !buf.length) {
-    return;
-  }
-
-  let image = nativeImage.createFromBuffer(buf);
-  if (!image || image.isEmpty()) {
-    cliQrDebugLog("nativeImage 无法解析 buffer，回退 CDP 截图");
-    fromBase64 = null;
-    let rect = await getDouyinLoginCaptureRectFromPuppeteerPage(page);
-    try {
-      if (rect) {
-        buf = await page.screenshot({
-          type: "png",
-          clip: {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-          },
-        });
-      } else {
-        buf = await page.screenshot({ type: "png" });
-      }
-      image = nativeImage.createFromBuffer(buf);
-    } catch (e) {
-      cliQrDebugLog("回退截图失败:", e && e.message);
-      return;
-    }
-  }
-  if (!image || image.isEmpty()) {
-    return;
-  }
-
-  const { width, height } = image.getSize();
-  if (!width || !height) {
-    return;
-  }
-
-  if (opts.saveQrPngPath) {
-    try {
-      writeLoginQrPngFile({
-        image,
-        saveQrPngPath: opts.saveQrPngPath,
-        rawBuf: fromBase64 ? buf : null,
-        fromDataUrl: Boolean(fromBase64),
-      });
-    } catch (e) {
-      console.error("写入 --save-qr-png 失败:", e.message);
-    }
-  }
-
-  await writeDouyinLoginQrToStdout(image, {
-    partitionLabel: opts.partitionLabel,
-    srcHint: fromBase64 ? "（页面 base64 栅格）" : "（CDP 截图栅格）",
-  });
+  const drawTerminal=process.stdout.isTTY&&opts.drawTerminalBlocks!==false;
+  if(!drawTerminal&&!opts.saveQrPngPath)return false;
+  const image=await captureVerifiedLoginQrFromPage(page,opts);
+  if(!image||opts.isActive&& !opts.isActive())return false;
+  let saved=true;
+  if(opts.saveQrPngPath)saved=writeLoginQrPngFile({image,saveQrPngPath:opts.saveQrPngPath});
+  if(drawTerminal)await writeDouyinLoginQrToStdout(image,{partitionLabel:opts.partitionLabel,srcHint:'（已核实二维码）'});
+  return saved;
 }

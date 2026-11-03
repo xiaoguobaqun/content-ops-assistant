@@ -21,7 +21,11 @@ async function stopGroup(pgid,graceMs){
 
 // argv 不经过 shell；即使直接子进程先退出，也要停止同组后代才返回。
 export function runProcess(command,args,{cwd,env=process.env,timeoutMs=90000,killGraceMs=3000,onSpawn}={}){
-  if(process.platform==='win32')return Promise.reject(Error('当前任务执行仅支持 macOS / Linux'));
+  if(process.platform==='win32')return (async()=>{
+    throwIfCancelled();const {runWindowsProcess}=await import('./windows-host.mjs');
+    const ownership=executionContext.getStore();const options={cwd,env,timeoutMs,killGraceMs,onSpawn,signal:currentSignal(),ownership};
+    return ownership?.windowsSession?ownership.windowsSession.run(command,args,options):runWindowsProcess(command,args,options);
+  })();
   return new Promise((resolve,reject)=>{
     try{throwIfCancelled();}catch(error){reject(error);return;}
     const signal=currentSignal();

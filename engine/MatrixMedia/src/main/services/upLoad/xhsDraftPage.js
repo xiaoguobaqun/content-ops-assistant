@@ -8,7 +8,9 @@ export function inspectXhsPage(){
   const actions=[...document.querySelectorAll('button,a,[role="button"]')].filter(visible).map(e=>({tag:e.tagName,text:norm(e.textContent).slice(0,100),cls:e.className,disabled:!!e.disabled||e.getAttribute('aria-disabled')==='true'}));
   const images=[...document.querySelectorAll('img,canvas')].filter(visible).map(e=>{let kind=e.tagName==='CANVAS'?'canvas':'',host='';try{const u=new URL(e.src);kind=u.protocol;host=u.protocol==='https:'?u.hostname:'';}catch{}const r=e.getBoundingClientRect();return {tag:e.tagName,cls:e.className,kind,host,width:r.width,height:r.height};});
   const hosts=[...document.querySelectorAll('xhs-publish-btn')].map(e=>Object.fromEntries(['submit-text','save-text','is-publish','is-save-draft','submit-disabled','save-disabled'].map(k=>[k,e.getAttribute(k)])));
-  return {url:location.origin+location.pathname,title:document.title,text,fields,actions,images,hosts};
+  const editControls=elements.filter(e=>e.childElementCount===0&&(e.textContent||'').trim()==='编辑').map(e=>{const r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {tag:e.tagName,namespace:e.namespaceURI,cls:String(e.className||''),display:getComputedStyle(e).display,visibility:getComputedStyle(e).visibility,rect:{x:r.x,y:r.y,width:r.width,height:r.height},hitTag:hit?.tagName,hitCls:String(hit?.className||''),ancestors:[e.parentElement,e.parentElement?.parentElement].filter(Boolean).map(p=>({tag:p.tagName,cls:String(p.className||'')}))};});
+  const coverControls=elements.filter(e=>e.childElementCount===0&&['编辑封面','上传封面','本地上传','上传图片','确定','完成','确认'].includes((e.textContent||'').trim())).map(e=>{const r=e.getBoundingClientRect();return {tag:e.tagName,text:norm(e.textContent),cls:String(e.className||''),rect:{x:r.x,y:r.y,width:r.width,height:r.height},visible:visible(e),ancestors:[e.parentElement,e.parentElement?.parentElement].filter(Boolean).map(p=>({tag:p.tagName,cls:String(p.className||'')}))};});
+  return {url:location.origin+location.pathname,title:document.title,text,fields,actions,images,hosts,editControls,coverControls};
 }
 
 /** 实测登录页右上角唯一二维码模式入口；不点击登录或协议勾选框。 */

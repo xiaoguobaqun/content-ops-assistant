@@ -25,7 +25,7 @@ test('timeout stops a grandchild even after its parent exits on SIGTERM',async t
   try{
     await assert.rejects(runProcess(process.execPath,['-e',script,pidFile],{timeoutMs:250,killGraceMs:100,onSpawn:pid=>group=pid}),/超时/);
     const pid=Number(await fs.readFile(pidFile,'utf8'));
-    const state=spawnSync('ps',['-p',String(pid),'-o','stat='],{encoding:'utf8'}).stdout.trim();
-    assert.ok(!state||state.startsWith('Z'),`grandchild still running: ${state}`);
-  }finally{try{process.kill(-group,'SIGKILL');}catch{}}
+    if(process.platform==='win32')assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+    else{const state=spawnSync('ps',['-p',String(pid),'-o','stat='],{encoding:'utf8'}).stdout.trim();assert.ok(!state||state.startsWith('Z'),`grandchild still running: ${state}`);}
+  }finally{try{process.kill(process.platform==='win32'?group:-group,'SIGKILL');}catch{}}
 });

@@ -13,7 +13,7 @@ await fs.mkdir(path.dirname(output),{recursive:true});await fs.rm(output,{recurs
 const runtimeNode=path.join(resources,'runtime/node');await fs.mkdir(path.dirname(runtimeNode),{recursive:true});await fs.copyFile(sourceNode,runtimeNode);await fs.chmod(runtimeNode,0o755);
 const manifest=desktopManifest(root,runtimeNode);const appRoot=path.join(resources,'app');await fs.mkdir(appRoot,{recursive:true});
 await fs.cp(path.join(root,'desktop'),path.join(appRoot,'desktop'),{recursive:true});await fs.copyFile(path.join(root,'LICENSE'),path.join(appRoot,'LICENSE'));
-await fs.mkdir(path.join(appRoot,'src'),{recursive:true});await fs.copyFile(path.join(root,'src/platforms.mjs'),path.join(appRoot,'src/platforms.mjs'));
+await fs.mkdir(path.join(appRoot,'src'),{recursive:true});for(const name of ['platforms.mjs','profile-schema.mjs'])await fs.copyFile(path.join(root,'src',name),path.join(appRoot,'src',name));
 await fs.writeFile(path.join(appRoot,'package.json'),JSON.stringify(manifest.package,null,2));await fs.writeFile(path.join(appRoot,'desktop-config.json'),JSON.stringify(manifest.config,null,2));
 const plist=path.join(output,'Contents/Info.plist');
 for(const [key,value]of Object.entries(manifest.info)){
