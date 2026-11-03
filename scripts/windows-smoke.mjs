@@ -54,8 +54,9 @@ export async function smokeWindowsInstaller({installer,reportPath=path.join(root
   let uninstaller;
   try{
     await fs.mkdir(dataRoot,{recursive:true});await fs.writeFile(sentinel,'仅用于卸载保留验证');
-    // NSIS /D consumes the final command-line remainder and must not be wrapped in quotes.
-    await run(installer,['/S','/currentuser',`/D=${installDir}`],{verbatim:true,timeoutMs:180000});
+    // electron-builder 用 StdUtils 再次解析 /D，值里的空格必须保留为一项。
+    // 只给值加引号，并将 /D 放在最后；不会经 shell 解释。
+    await run(installer,['/S','/currentuser',`/D="${installDir}"`],{verbatim:true,timeoutMs:180000});
     const executable=path.join(installDir,'Content-Ops-Assistant.exe');await fs.access(executable);
     report.checks.installed=true;
     const names=await fs.readdir(installDir);uninstaller=names.find(name=>/^uninstall.*\.exe$/i.test(name));
