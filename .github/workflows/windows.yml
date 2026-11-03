@@ -21,9 +21,6 @@ jobs:
     env:
       CI: true
       CSC_IDENTITY_AUTO_DISCOVERY: false
-      CONTENT_OPS_DATA_ROOT: ${{ runner.temp }}\content-ops-offline-data
-      CONTENT_OPS_DOCUMENTS: ${{ runner.temp }}\content-ops-offline-documents
-      CONTENT_OPS_ENGINE_USER_DATA: ${{ runner.temp }}\content-ops-offline-engine
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,6 +29,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20.20.2'
+      - name: Isolate offline verification data
+        shell: pwsh
+        run: |
+          "CONTENT_OPS_DATA_ROOT=$env:RUNNER_TEMP\content-ops-offline-data" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CONTENT_OPS_DOCUMENTS=$env:RUNNER_TEMP\content-ops-offline-documents" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CONTENT_OPS_ENGINE_USER_DATA=$env:RUNNER_TEMP\content-ops-offline-engine" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Install locked engine dependencies
         working-directory: engine/MatrixMedia
         run: |
