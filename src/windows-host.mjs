@@ -48,7 +48,7 @@ class WindowsSession {
     this.child.once('error',()=>this.fail(Error('Windows 保护程序不可用，请重新安装应用')));
     this.child.once('close',code=>{
       this.exited=true;clearTimeout(this.startTimer);
-      if(!this.closing||code!==0||this.active)this.fail(unknown());
+      if(!this.closing||code!==0||this.active){const error=unknown();error.nativeExitCode=code;this.fail(error);}
       this.exitResolve();
     });
     this.startTimer=setTimeout(()=>{this.fail(unknown());this.child.kill();},Math.min(waitMs+10000,2147483647));

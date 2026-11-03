@@ -48,8 +48,6 @@ internal static class WindowsHost
 
     static int Main()
     {
-        Console.InputEncoding = new UTF8Encoding(false);
-        Console.OutputEncoding = new UTF8Encoding(false);
         // Only the explicitly created child stdio pipe ends may be inherited.
         // In particular, descendants must never inherit the parent's input pipe.
         for (int number = -10; number >= -12; number--)
@@ -60,6 +58,12 @@ internal static class WindowsHost
         }
         try
         {
+            // DETACHED_PROCESS 没有控制台，.NET Framework 的 Encoding setter 会
+            // 调用 SetConsoleCP 并失败。协议只使用 Node 提供的 UTF-8 管道。
+            Console.SetIn(new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false), false, 4096));
+            StreamWriter output = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false), 4096);
+            output.AutoFlush = true;
+            Console.SetOut(output);
             JavaScriptSerializer reader = new JavaScriptSerializer();
             reader.MaxJsonLength = 4 * 1024 * 1024;
             string first = Console.ReadLine();
