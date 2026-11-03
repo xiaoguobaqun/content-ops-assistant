@@ -104,9 +104,13 @@ async function download(url,destination){
   await fs.writeFile(destination,await response.text());return destination;
 }
 
+export async function ensureToolsProject(toolsRoot){
+  await fs.mkdir(toolsRoot,{recursive:true});const file=path.join(toolsRoot,'package.json');
+  try{await fs.access(file);}catch(error){if(error.code!=='ENOENT')throw error;await fs.writeFile(file,JSON.stringify({name:'content-ops-media-tools',version:'0.0.0',private:true},null,2));}
+}
 export async function prepareWindowsTools({projectRoot=ownRoot}={}) {
   if(process.platform!=='win32'||process.arch!=='x64'||!process.version.startsWith('v20.'))throw Error('Windows 构建需要 Windows x64 和 Node 20');
-  const toolsRoot=path.join(projectRoot,'.validation/windows-tools');await fs.mkdir(toolsRoot,{recursive:true});
+  const toolsRoot=path.join(projectRoot,'.validation/windows-tools');await ensureToolsProject(toolsRoot);
   // Exact npm versions are isolated from application dependencies. npm verifies registry integrity.
   const ffmpegRoot=path.join(toolsRoot,'node_modules/ffmpeg-static'),ffprobeRoot=path.join(toolsRoot,'node_modules/@ffprobe-installer/win32-x64');
   await exec(process.env.ComSpec||'cmd.exe',['/d','/s','/c','npm install --no-audit --no-fund --save-exact ffmpeg-static@5.2.0 @ffprobe-installer/win32-x64@5.1.0'],{cwd:toolsRoot,windowsHide:true,maxBuffer:4*1024*1024,env:{...process.env,npm_config_arch:'x64',npm_config_platform:'win32',FFMPEG_BIN:path.join(ffmpegRoot,'ffmpeg.exe'),FFMPEG_BINARY_RELEASE:'b6.0',FFMPEG_BINARIES_URL:'https://github.com/eugeneware/ffmpeg-static/releases/download'}});

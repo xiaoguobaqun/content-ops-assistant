@@ -107,3 +107,12 @@ test('installed check waits for the initial refresh even when activity has not s
  await new Promise(r=>setTimeout(r,20));assert.equal(finished,false);state={checkedAt:123,activity:{status:'completed'}};
  assert.equal((await check).checkedAt,123);
 });
+
+test('media tool preparation creates an isolated npm project instead of resolving the parent package',async t=>{
+ const {ensureToolsProject}=await import('../scripts/build-windows.mjs');
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'ops-tools-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const original='{"name":"parent-project","version":"1.0.0"}';await fs.writeFile(path.join(root,'package.json'),original);
+ const tools=path.join(root,'.validation/windows-tools');await ensureToolsProject(tools);
+ assert.equal(JSON.parse(await fs.readFile(path.join(tools,'package.json'),'utf8')).private,true);
+ assert.equal(await fs.readFile(path.join(root,'package.json'),'utf8'),original);
+});
