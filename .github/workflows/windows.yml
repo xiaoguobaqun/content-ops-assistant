@@ -2,6 +2,8 @@ name: Windows installer
 
 on:
   push:
+    branches: [main, codex/windows-installer]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
