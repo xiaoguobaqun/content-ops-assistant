@@ -26,7 +26,9 @@ class WindowsSession {
     this.active=null;this.nextId=0;this.failure=null;this.closing=false;this.exited=false;
     this.ready=new Promise((resolve,reject)=>{this.readyResolve=resolve;this.readyReject=reject;});
     this.exit=new Promise(resolve=>this.exitResolve=resolve);
-    this.child=spawn(process.env.CONTENT_OPS_WINDOWS_HOST||defaultHost,[],{windowsHide:true,stdio:['pipe','pipe','pipe']});
+    // Windows libuv 会把普通子进程加入随 Node 退出而终止的 Job。
+    // 守护者必须活到读到 EOF 并清空自己的 Job；管道仍保持受控连接，不 unref。
+    this.child=spawn(process.env.CONTENT_OPS_WINDOWS_HOST||defaultHost,[],{detached:true,windowsHide:true,stdio:['pipe','pipe','pipe']});
     let pending='';
     // Native diagnostics never include argv/environment, and are never copied into user errors.
     let diagnostic='';this.child.stderr.on('data',chunk=>{diagnostic=(diagnostic+chunk.toString()).slice(-4096);});
@@ -132,7 +134,7 @@ export async function withWindowsLock(file,work,{waitMs=0}={}){
   const session=new WindowsSession(file,waitMs);
   let result;let error;
   try{await session.ready;result=await work(session);}catch(cause){error=cause;}
-  try{await session.close();}catch(cause){if(error)cause.cause=error;throw cause;}
+  try{await session.close();}catch(cause){if(error&&cause!==error&&cause.cause===undefined)cause.cause=error;throw cause;}
   if(error)throw error;
   return result;
 }

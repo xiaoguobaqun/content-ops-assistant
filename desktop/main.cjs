@@ -10,7 +10,7 @@ app.setName('内容运营助手');
 const userDataPath=process.env.CONTENT_OPS_DATA_ROOT?path.join(process.env.CONTENT_OPS_DATA_ROOT,'ui-profile'):path.join(app.getPath('appData'),'content-ops-desktop');
 fs.mkdirSync(userDataPath,{recursive:true,mode:0o700});app.setPath('userData',userDataPath);
 let config;try{config=JSON.parse(fs.readFileSync(path.join(__dirname,'../desktop-config.json'),'utf8'));}catch{config={projectRoot:path.resolve(__dirname,'..')};}
-const runtime=desktopRuntime({config,appRoot:path.resolve(__dirname,'..'),userDataPath:app.getPath('userData'),documentsPath:app.getPath('documents')});
+const runtime=desktopRuntime({config,appRoot:path.resolve(__dirname,'..'),userDataPath:app.getPath('userData'),documentsPath:app.getPath('documents'),env:process.env});
 const {projectRoot,dataRoot,node}=runtime;
 process.env.CONTENT_OPS_DATA_ROOT=dataRoot;
 if(runtime.engineUserData)process.env.CONTENT_OPS_ENGINE_USER_DATA=runtime.engineUserData;

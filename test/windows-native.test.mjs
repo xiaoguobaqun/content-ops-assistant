@@ -24,6 +24,7 @@ test('missing native guardian fails closed without exposing command arguments',a
     assert.match(error.message,/不可用|结果未知/);
     assert.equal(error.message.includes('private-command'),false);
     assert.equal(error.message.includes('private-token'),false);
+    assert.notEqual(error.cause,error,'native failure must not create a cyclic Error.cause that crashes reporters');
     return true;
   });
 });

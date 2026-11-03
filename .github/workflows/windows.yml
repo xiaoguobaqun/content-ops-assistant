@@ -33,14 +33,16 @@ jobs:
           "CONTENT_OPS_DATA_ROOT=$env:RUNNER_TEMP\content-ops-offline-data" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "CONTENT_OPS_DOCUMENTS=$env:RUNNER_TEMP\content-ops-offline-documents" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "CONTENT_OPS_ENGINE_USER_DATA=$env:RUNNER_TEMP\content-ops-offline-engine" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Compile Windows native protection first
+        run: node scripts/build-windows-host.mjs
+      - name: Native guardian crash and cancellation regression
+        run: node --test test/windows-native.test.mjs
       - name: Install locked engine dependencies
         working-directory: engine/MatrixMedia
         run: |
           corepack enable
           corepack prepare yarn@1.22.22 --activate
           yarn install --frozen-lockfile --non-interactive
-      - name: Compile Windows native protection first
-        run: node scripts/build-windows-host.mjs
       - name: Prepare pinned media tools and Chrome
         shell: pwsh
         run: |
