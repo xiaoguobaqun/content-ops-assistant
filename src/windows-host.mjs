@@ -127,7 +127,7 @@ class WindowsSession {
 // The native guardian owns both this handle and every Job spawned in the session.
 // On Node death it sees EOF, empties the Job, and only then releases the guard.
 export async function withWindowsLock(file,work,{waitMs=0}={}){
-  waitMs=milliseconds(waitMs,0);
+  waitMs=waitMs===Infinity?2147483647:milliseconds(waitMs,0);
   if(file!==null){if(typeof file!=='string'||!file||file.includes('\0'))throw Error('Windows 文件锁路径无效');file=path.resolve(file);await fs.mkdir(path.dirname(file),{recursive:true});}
   const session=new WindowsSession(file,waitMs);
   let result;let error;

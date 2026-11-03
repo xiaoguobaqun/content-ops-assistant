@@ -79,7 +79,7 @@ test('Windows lock waiter enters only after the current session exits', {skip:!w
   const {withWindowsLock}=await native();const file=path.join(await temp(t),'wait.guard');
   let waiting;let entered=false;
   await withWindowsLock(file,async()=>{
-    waiting=withWindowsLock(file,()=>{entered=true;return true;},{waitMs:4000});
+    waiting=withWindowsLock(file,()=>{entered=true;return true;},{waitMs:Infinity});
     await delay(150);assert.equal(entered,false);
   });
   assert.equal(await waiting,true);
@@ -141,6 +141,7 @@ test('Windows abrupt Node parent death keeps guard until descendants are stopped
   t.after(()=>{try{owner.kill('SIGKILL');}catch{}});
   await readEventually(ready);const descendant=Number(await readEventually(pidFile));
   await assert.rejects(withWindowsLock(file,()=>assert.fail('lock entered while child running')),/已有任务|占用/);
+  assert.ok(owner.pid>1&&owner.pid!==process.pid&&owner.pid!==process.ppid,'crash fixture must be a separate child process');
   const exited=new Promise(resolve=>owner.once('exit',resolve));owner.kill('SIGKILL');await exited;
   await withWindowsLock(file,async()=>{assert.equal(alive(descendant),false,'guard released before descendant stopped');},{waitMs:10000});
   await stopped(descendant);
@@ -151,11 +152,17 @@ test('Windows helper crash kills its Job and reports an unknown outcome', {skip:
   const script=`const fs=require('node:fs');const {spawn}=require('node:child_process');const p=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',detached:true});fs.writeFileSync(process.argv[1],JSON.stringify({helper:process.ppid,descendant:p.pid}));setInterval(()=>{},1000);`;
   const execution=withWindowsLock(guard,session=>session.run(process.execPath,['-e',script,pidFile],{ownership:{launching(){},spawned(){},stopped(){idle=true;}}}));
   const rejection=assert.rejects(execution,/结果未知/);
-  const pids=JSON.parse(await readEventually(pidFile));process.kill(pids.helper,'SIGKILL');await rejection;
+  const pids=JSON.parse(await readEventually(pidFile));assert.ok(pids.helper>1&&pids.helper!==process.pid&&pids.helper!==process.ppid&&pids.helper!==pids.descendant,'guardian fixture must not target a test runner');process.kill(pids.helper,'SIGKILL');await rejection;
   assert.equal(idle,false,'an unverified guardian failure must leave ownership unknown');
   try{
     await withWindowsLock(guard,()=>{assert.equal(alive(pids.descendant),false,'hard guardian kill allowed overlap with a survivor');});
   }catch(error){assert.match(error.message,/占用|已有任务|未知|回查/);}
   await stopped(pids.descendant);
   await assert.rejects(runWindowsProcess(path.join(dir,'missing secret.exe'),['credential=private']),error=>!error.message.includes('credential=private')&&!error.message.includes('secret.exe'));
+});
+
+test('unbounded metadata lock wait is accepted and delegated to native protection',async t=>{
+ const {withWindowsLock}=await import(wrapperUrl);const previous=process.env.CONTENT_OPS_WINDOWS_HOST;
+ process.env.CONTENT_OPS_WINDOWS_HOST=path.join(os.tmpdir(),'missing-wait-guard.exe');t.after(()=>{if(previous===undefined)delete process.env.CONTENT_OPS_WINDOWS_HOST;else process.env.CONTENT_OPS_WINDOWS_HOST=previous;});
+ await assert.rejects(withWindowsLock(null,()=>{}, {waitMs:Infinity}),e=>/不可用|结果未知/.test(e.message));
 });
