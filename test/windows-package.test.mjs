@@ -116,3 +116,12 @@ test('media tool preparation creates an isolated npm project instead of resolvin
  assert.equal(JSON.parse(await fs.readFile(path.join(tools,'package.json'),'utf8')).private,true);
  assert.equal(await fs.readFile(path.join(root,'package.json'),'utf8'),original);
 });
+
+test('installed self-check delegates engine diagnostics to the Node worker rather than importing backend into Electron',async t=>{
+ const {createRequire}=await import('node:module');const {checkInstalledApp}=createRequire(import.meta.url)('../desktop/installed-check.cjs');
+ const directory=await fs.mkdtemp(path.join(os.tmpdir(),'ops-install-check-'));t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+ const report=path.join(directory,'report.json');const worker={request:async method=>{if(method==='dashboard')return {protocolVersion:1,checkedAt:123,activity:null};if(method==='runtimeCheck')return {health:{ok:true,checks:[{name:'ffmpeg',ok:true},{name:'ffprobe',ok:true}]},engineHelp:'publish --help'};throw Error('unexpected request');}};
+ const window={webContents:{isLoading:()=>false,executeJavaScript:async()=>true}};
+ const result=await checkInstalledApp({window,worker,projectRoot:path.join(directory,'no-source-code'),dataRoot:path.join(directory,'data'),reportPath:report});
+ assert.equal(result.ok,true);assert.equal(JSON.parse(await fs.readFile(report,'utf8')).checks.engine,true);
+});

@@ -47,7 +47,8 @@ export async function smokeWindowsInstaller({installer,reportPath=path.join(root
   const manifest=JSON.parse(await fs.readFile(path.join(root,'package.json'),'utf8'));
   installer=path.resolve(installer||path.join(root,`dist/Content-Ops-Assistant-${manifest.version}-win-x64-setup.exe`));
   const temporary=await fs.mkdtemp(path.join(os.tmpdir(),'content-ops-win-smoke-'));
-  const installDir=path.join(temporary,'安装 目录'),dataRoot=path.join(temporary,'工作 资料');
+  // electron-builder 的安装目录页会自动补应用子目录，测试给出完整应用目录。
+  const installDir=path.join(temporary,'安装 目录','Content-Ops-Assistant'),dataRoot=path.join(temporary,'工作 资料');
   const internalReport=path.join(temporary,'installed-report.json'),sentinel=path.join(dataRoot,'uninstall-preserve.txt');
   const report={ok:false,version:manifest.version,platform:'win32-x64',livePlatformAcceptance:false,checks:{}};
   let uninstaller;
@@ -73,7 +74,7 @@ export async function smokeWindowsInstaller({installer,reportPath=path.join(root
     assert.equal(await fs.readFile(sentinel,'utf8'),'仅用于卸载保留验证','卸载删除了用户资料');
     report.checks.uninstalled=true;report.checks.dataPreserved=true;report.ok=true;
     return report;
-  }catch(error){report.error=error.message;throw error;}
+  }catch(error){report.error=error.message;report.temporaryLayout=await fs.readdir(temporary).catch(()=>[]);report.installLayout=await fs.readdir(installDir).catch(()=>[]);throw error;}
   finally{
     await fs.mkdir(path.dirname(reportPath),{recursive:true});await fs.writeFile(reportPath,JSON.stringify(report,null,2));
     if(!report.checks.uninstalled&&uninstaller)try{await run(uninstaller,['/S','/currentuser'],{timeoutMs:60000});}catch{}

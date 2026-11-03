@@ -71,6 +71,7 @@ export function createDesktopService({root=defaultRoot,documentsDir,signal,engin
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('操作参数无效');
     if(profileMethods.has(method))return profileService.handle(method,args);
     if(method==='dashboard')return dashboard();
+    if(method==='runtimeCheck'){idle();return {health:await doctor(),engineHelp:await engine.help()};}
     if(method==='getJob')return view(await getJob(args.id));
     if(method==='getBatch'){const row=await batches.view(validId(args.id),{active:activity?.status==='running'&&activity.batchId===args.id}),deleted=await taskTrashedAt(root,args.id);return deleted?{...row,trashedAt:deleted,canExecute:false,jobs:row.jobs.map(j=>({...j,trashedAt:deleted,canExecute:false,canVerify:false}))}:row;}
     if(method==='trashTask'||method==='restoreTask'){

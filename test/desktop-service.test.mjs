@@ -151,3 +151,11 @@ test('同平台两个账号可分别连接并保留，连接副号不退出或�
  const accounts=(await service.handle('dashboard')).accounts;assert.deepEqual(accounts.map(a=>a.phone).sort(),['合成主号','合成副号'].sort());assert.equal(accounts.every(a=>a.loggedIn===true),true);assert.equal(calls.length,2);
  const {createAccountStore}=await import('../src/accounts.mjs'),store=createAccountStore({root,documentsDir});const a=await store.checkName('合成主号','dy'),b=await store.checkName('合成副号','dy');assert.notEqual(a.partition,b.partition);assert.equal((await store.checkName('合成主号','dy')).partition,a.partition);
 });
+
+test('installed diagnostics run in the configured worker and cannot overlap active operations',async t=>{
+ const {root}=await fixture(t),{createDesktopService}=await api();let release;const gate=new Promise(r=>release=r);
+ const health={ok:true,checks:[{name:'ffmpeg',ok:true},{name:'ffprobe',ok:true}]};
+ const service=createDesktopService({root,doctor:async()=>health,engine:{accounts:async()=>gate,help:async()=>'publish --help'}});
+ await service.handle('refresh');await assert.rejects(service.handle('runtimeCheck'),/正在/);release([]);await service.waitForIdle();
+ assert.deepEqual(await service.handle('runtimeCheck'),{health,engineHelp:'publish --help'});
+});
