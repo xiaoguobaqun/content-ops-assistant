@@ -7,10 +7,11 @@ import {withEngineLock} from './lock.mjs';
 import {executionContext} from './execution-context.mjs';
 import {buildAccountPartition} from '../engine/MatrixMedia/src/shared/accountPartition.js';
 import {platformId,getPlatform,validatePlatformInput,assertPlatformExecution,platformContent} from './platforms.mjs';
+import {dataRoot,mediaTool} from './runtime-paths.mjs';
 
 export const projectRoot=fileURLToPath(new URL('../',import.meta.url));
 export const engineRoot=path.join(projectRoot,'engine/MatrixMedia');
-const localRoot=path.join(projectRoot,'.local');
+const localRoot=dataRoot;
 export function publishArgs(job){
   const {input,files}=job;
   validatePlatformInput(input);const platform=platformId(input),text=platformContent(input);
@@ -19,7 +20,7 @@ export function publishArgs(job){
   else {if(text.shortTitle)args.push('--short-title',text.shortTitle);args.push('--checkpoint-file',path.join(localRoot,'jobs',job.id,`${platform}-checkpoint.json`));}
   args.push(input.mode==='draft'?'--draft':'--publish');return args;
 }
-export function loginArgs(phone,qrPath,platform='dy'){const p=getPlatform(platform);if(!p.enabled&&!p.loginEnabled)throw Error('该平台暂未接入');const args=['login','--platform',p.id,'--phone',phone,'--save-qr-png',qrPath,'--timeout-sec','300'];if(['sph','xhs'].includes(platform))args.push('--show');return args;}
+export function loginArgs(phone,qrPath,platform='dy'){const p=getPlatform(platform);if(!p.enabled&&!p.loginEnabled)throw Error('该平台暂未接入');const args=['login','--platform',p.id,'--phone',phone,'--save-qr-png',qrPath,'--timeout-sec','300','--show'];return args;}
 export function parseEngineReply(stdout,channel){
   for(const line of stdout.trim().split(/\r?\n/).reverse()){
     try{const data=JSON.parse(line);if(data.channel===channel) return data;}catch{}
@@ -54,7 +55,13 @@ async function callEngine(args,{timeoutMs=90000,recordLogs=true}={}){
   return result;
 }
 export function confirmEngineLogin(result,{platform='dy',phone}={}){
-  if(result.code!==0)throw Error('登录未完成，请在平台窗口完成本人验证。');
+  if(result.code!==0){
+    if(platform==='dy'){
+      let reply;try{reply=parseEngineReply(result.stdout||'','dy-login');}catch{}
+      if(reply?.ok===false&&reply.reason==='login-component-load-failed')throw Error('抖音登录组件加载失败，已重新加载一次。请检查网络后重新获取二维码。');
+    }
+    throw Error('登录未完成，请在平台窗口完成本人验证。');
+  }
   if(platform==='xhs'){
     const reply=parseEngineReply(result.stdout,'xhs-login');
     if(reply.ok!==true||reply.platform!=='xhs'||reply.partition!==buildAccountPartition(phone,'小红书'))throw Error('小红书登录账号分区尚未核实');
@@ -68,6 +75,16 @@ export function draftQuerySpec(job){
   return {expectedFile,expected,channel,args:[channel,'--phone',job.input.phone,'--expected-file',expectedFile,'--screenshot',path.join(dir,'verified-draft.png')]};
 }
 export const engine={
+  async accountRemoval(phone,platform,{preview=false,expectedDigest}={}){
+    const args=['account-remove','--platform',getPlatform(platform).id,'--phone',phone];
+    if(preview)args.push('--preview');else args.push('--expected-digest',expectedDigest);
+    const result=await callEngine(args,{recordLogs:false});const reply=parseEngineReply(result.stdout,'account-remove');
+    if(result.code!==0||reply.ok!==true)throw Error(reply.message||'账号移除未完成，请刷新后检查');
+    if(reply.phone!==phone||reply.platform!==platform||reply.phase!==(preview?'preview':'removed')||preview&&!/^sha256:[a-f0-9]{64}$/.test(reply.digest||'')||!preview&&reply.loggedOut!==true)throw Error('账号移除回执未核实，请刷新后检查');
+    return reply;
+  },
+  async profileCapabilities(){const reply=parseEngineReply((await callEngine(['profile-sample','--capabilities'])).stdout,'profile-sample-capabilities');if(reply.ok!==true||!reply.platforms)throw Error('账号资料读取能力尚未确认');return reply.platforms;},
+  async profileSample(phone,platform){const result=await callEngine(['profile-sample','--platform',getPlatform(platform).id,'--phone',phone,'--limit','20'],{timeoutMs:120000,recordLogs:false});return parseEngineReply(result.stdout,'profile-sample');},
   async login(phone,{qrPath,platform='dy'}){const result=await callEngine(loginArgs(phone,qrPath,platform),{timeoutMs:320000,recordLogs:false});return confirmEngineLogin(result,{platform,phone});},
   async queryDraft(job){
     const spec=draftQuerySpec(job);await fs.writeFile(spec.expectedFile,JSON.stringify(spec.expected),{mode:0o600});
@@ -84,9 +101,9 @@ export const engine={
 };
 export async function doctor(){
   const checks=[];
-  try{const result=await runProcess('python3',['-c','import fcntl; print("Python 3 / flock available")']);checks.push({name:'account-lock',ok:result.code===0});}catch{checks.push({name:'account-lock',ok:false,message:'需要 macOS/Linux 与 Python 3'});}
+  try{if(process.platform==='win32')await withEngineLock(localRoot,async()=>{});else{const result=await runProcess('python3',['-c','import fcntl; print("Python 3 / flock available")']);if(result.code!==0)throw Error('lock unavailable');}checks.push({name:'account-lock',ok:true});}catch{checks.push({name:'account-lock',ok:false,message:process.platform==='win32'?'Windows 进程保护不可用或账号正在使用':'需要 macOS/Linux 与 Python 3'});}
   for(const tool of ['ffmpeg','ffprobe']){
-    try{const result=await runProcess(tool,['-version']);checks.push({name:tool,ok:result.code===0,version:result.stdout.split('\n')[0]});}catch{checks.push({name:tool,ok:false});}
+    try{const result=await runProcess(mediaTool(tool),['-version']);checks.push({name:tool,ok:result.code===0,version:result.stdout.split('\n')[0]});}catch{checks.push({name:tool,ok:false});}
   }
   try{await assertBuilt();checks.push({name:'engine',ok:true});}catch(e){checks.push({name:'engine',ok:false,message:e.message});}
   return {ok:checks.every(c=>c.ok),checks};

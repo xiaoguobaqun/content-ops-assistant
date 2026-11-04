@@ -1,24 +1,19 @@
 "use strict";
 
 import fs from "fs";
-import { nativeImage, session } from "electron";
+import { session } from "electron";
 import puppeteerCore from "puppeteer-core";
 import { addExtra } from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import ptConfig from "../../config/ptConfig";
-import {
-  getDouyinLoginCaptureRectFromPuppeteerPage,
-  tryReadAnimateQrImageBufferFromPage,
-  writeDouyinLoginQrToStdout,
-} from "./terminalQrFromCapture.js";
-import { writeLoginQrPngFile } from "./terminalQrQrcodeTerminal.js";
+import {paintLoginQrToTerminalFromPuppeteerPage} from "./terminalQrFromCapture.js";
+import {startLoginQrLoop} from "./loginQrLoop.js";
 import { clearTerminalScreen } from "./qrBitmapToBlocks.js";
 import {
   hasDouyinSession,
   normalizeDouyinPartition,
 } from "./douyinSessionUtil.js";
 import {
-  CLI_LOGIN_QR_FIRST_DELAY_MS,
   CLI_LOGIN_QR_REFRESH_MS,
 } from "./cliLoginQrRefresh.js";
 
@@ -73,90 +68,7 @@ function resolveChromiumExecutable() {
  * @param {{ partitionLabel: string, saveQrPngPath?: string | null, drawTerminalBlocks?: boolean }} opts
  */
 async function refreshLoginQrFromPuppeteerPage(page, opts) {
-  const drawTerminalBlocks = Boolean(
-    opts.drawTerminalBlocks && process.stdout.isTTY
-  );
-  if (!drawTerminalBlocks && !opts.saveQrPngPath) {
-    return;
-  }
-  let fromBase64 = await tryReadAnimateQrImageBufferFromPage(page);
-  let buf = fromBase64;
-  if (!buf || !buf.length) {
-    cliQrDebugLog("无头模式：将使用 CDP 截图");
-    try {
-      const rect = await getDouyinLoginCaptureRectFromPuppeteerPage(page);
-      if (rect) {
-        buf = await page.screenshot({
-          type: "png",
-          clip: {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-          },
-        });
-      } else {
-        buf = await page.screenshot({ type: "png" });
-      }
-    } catch (e) {
-      cliQrDebugLog("截图失败:", e && e.message);
-      return;
-    }
-  }
-  if (!buf || !buf.length) {
-    return;
-  }
-  let image = nativeImage.createFromBuffer(buf);
-  if (!image || image.isEmpty()) {
-    cliQrDebugLog("nativeImage 无法解析，回退截图");
-    fromBase64 = null;
-    try {
-      const rect = await getDouyinLoginCaptureRectFromPuppeteerPage(page);
-      if (rect) {
-        buf = await page.screenshot({
-          type: "png",
-          clip: {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-          },
-        });
-      } else {
-        buf = await page.screenshot({ type: "png" });
-      }
-      image = nativeImage.createFromBuffer(buf);
-    } catch (e) {
-      cliQrDebugLog("回退截图失败:", e && e.message);
-      return;
-    }
-  }
-  if (!image || image.isEmpty()) {
-    return;
-  }
-  const { width, height } = image.getSize();
-  if (!width || !height) {
-    return;
-  }
-  if (opts.saveQrPngPath) {
-    try {
-      writeLoginQrPngFile({
-        image,
-        saveQrPngPath: opts.saveQrPngPath,
-        rawBuf: fromBase64 ? buf : null,
-        fromDataUrl: Boolean(fromBase64),
-      });
-    } catch (e) {
-      console.error("写入 --save-qr-png 失败:", e.message);
-    }
-  }
-  if (!drawTerminalBlocks) {
-    return;
-  }
-  await writeDouyinLoginQrToStdout(image, {
-    partitionLabel: opts.partitionLabel,
-    srcHint: fromBase64 ? "（页面 base64 栅格）" : "（无头截图栅格）",
-  });
+  return paintLoginQrToTerminalFromPuppeteerPage(page,{...opts,drawTerminalBlocks:Boolean(opts.drawTerminalBlocks&&process.stdout.isTTY)});
 }
 
 async function hasPassportCookieOnPage(page) {
@@ -175,6 +87,7 @@ export async function runDouyinPuppeteerHeadlessLogin({
   timeoutMs,
   saveQrPngPath = null,
 }) {
+  const deadline=Date.now()+timeoutMs,remaining=()=>deadline-Date.now();
   const cfg = ptConfig.抖音;
   if (!cfg) {
     console.error("内部错误: 未找到抖音 ptConfig");
@@ -221,6 +134,7 @@ export async function runDouyinPuppeteerHeadlessLogin({
   let browser;
   try {
     browser = await puppeteer.launch({
+      timeout:Math.max(1,Math.min(30000,remaining())),
       headless: true,
       executablePath,
       userDataDir,
@@ -252,12 +166,13 @@ export async function runDouyinPuppeteerHeadlessLogin({
   };
 
   try {
-    await page.goto(cfg.index, { waitUntil: "networkidle2", timeout: 120000 });
+    await page.goto(cfg.index, { waitUntil: "domcontentloaded", timeout: Math.max(1,Math.min(120000,remaining())) });
   } catch (e) {
     console.error("加载抖音创作者页失败:", e.message);
     await browser.close().catch(() => {});
     return 1;
   }
+  if(remaining()<=0){await browser.close().catch(()=>{});return 3;}
 
   let settled = false;
   return await new Promise((resolve) => {
@@ -268,7 +183,7 @@ export async function runDouyinPuppeteerHeadlessLogin({
       if (settled) return;
       settled = true;
       if (pollTimer) clearInterval(pollTimer);
-      if (qrTimer) clearInterval(qrTimer);
+      if (qrTimer) qrTimer();
       if (deadlineTimer) clearTimeout(deadlineTimer);
       try {
         await browser.close();
@@ -305,15 +220,7 @@ export async function runDouyinPuppeteerHeadlessLogin({
           })
           .catch(() => {});
       }, 2000);
-      qrTimer = setInterval(() => {
-        if (settled) return;
-        refreshLoginQrFromPuppeteerPage(page, paintOpts).catch(() => {});
-      }, CLI_LOGIN_QR_REFRESH_MS);
-      setTimeout(() => {
-        if (!settled) {
-          refreshLoginQrFromPuppeteerPage(page, paintOpts).catch(() => {});
-        }
-      }, CLI_LOGIN_QR_FIRST_DELAY_MS);
+      qrTimer=startLoginQrLoop({capture:()=>refreshLoginQrFromPuppeteerPage(page,{...paintOpts,isActive:()=>!settled}),refreshMs:CLI_LOGIN_QR_REFRESH_MS});
     }
 
     deadlineTimer = setTimeout(() => {
@@ -325,6 +232,6 @@ export async function runDouyinPuppeteerHeadlessLogin({
         );
         finish(3, {});
       }
-    }, timeoutMs);
+    }, Math.max(0,remaining()));
   });
 }

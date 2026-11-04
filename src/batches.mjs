@@ -7,6 +7,8 @@ import {prepareJob,readJob,runJob,assertJobUnchanged} from './jobs.mjs';
 import {getPlatform,validatePlatformInput,assertPlatformExecution} from './platforms.mjs';
 import {accountMatches} from './people.mjs';
 import {throwIfCancelled} from './cancellation.mjs';
+import {assertTaskActive} from './task-history.mjs';
+import {readVerificationReports} from './verification-report.mjs';
 import {jobView} from '../desktop/model.mjs';
 const running=batch=>batch.phase==='running'&&processAlive(batch.ownerPid);
 const save=(root,batch)=>atomicJson(batchFile(root,batch.id),batch);
@@ -24,7 +26,7 @@ export function createBatchStore({root,people,engine,prepare=prepareJob,run=runJ
  async function read(id){const batch=await readBatchRecord(root,localId(id));await children(batch);return batch;}
  function remaining(batch,jobs){return batch.targets.filter(t=>t.eligible&&jobs.some(j=>j.id===t.jobId&&!j.startedAt&&j.state==='prepared')).map(t=>t.jobId);}
  async function view(id,{active=false}={}){
-  const batch=await read(id),raw=await children(batch),jobs=raw.map((job,i)=>({...jobView(job,{active:active&&batch.activeJobId===job.id}),eligible:batch.targets[i].eligible,blockedReason:batch.targets[i].blockedReason||''}));
+  const batch=await read(id),raw=await children(batch),jobs=await Promise.all(raw.map(async(job,i)=>({...jobView({...job,verificationReports:await readVerificationReports(root,job.id)},{active:active&&batch.activeJobId===job.id}),eligible:batch.targets[i].eligible,blockedReason:batch.targets[i].blockedReason||''})));
   const ready=!['preparing','preparation_failed'].includes(batch.phase),live=running(batch),targetIds=ready?remaining(batch,raw):[];
   const unknown=jobs.filter(j=>j.startedAt&&j.state!=='draft_confirmed'),success=jobs.filter(j=>j.state==='draft_confirmed').length;
   const state=live?'running':!ready?'incomplete':unknown.length?'unknown':success===jobs.length&&jobs.length?'draft_confirmed':success?'partial':'prepared';
@@ -49,6 +51,7 @@ export function createBatchStore({root,people,engine,prepare=prepareJob,run=runJ
   }catch(e){batch.phase='preparation_failed';batch.ownerPid=null;batch.message=e.message;await save(root,batch);throw e;}
  }
  async function execute(id,{expectedDigest,expectedAttempt,targetIds,allowUnknown=false}={}){
+  await assertTaskActive(root,{id,input:{}});
   let batch,token;
   // 素材哈希可能耗时；登记锁内只复核持久化快照。runJob 上传前仍再次检查文件。
   const initial=await read(id);for(const job of await children(initial))await assertJobUnchanged(job);

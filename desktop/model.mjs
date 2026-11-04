@@ -1,6 +1,6 @@
 import path from 'node:path';
 import {getPlatform,platformId,validatePlatformInput} from '../src/platforms.mjs';
-export const states={prepared:['待执行','neutral'],running:['处理中','blue'],draft_confirmed:['已存草稿','green'],confirmed:['已发布','green'],unknown:['待核实','amber']};
+export const states={prepared:['待执行','neutral'],running:['处理中','blue'],draft_confirmed:['已存草稿','green'],confirmed:['已发布','green'],unknown:['待核实','amber'],invalidated:['已作废','neutral']};
 export function jobView(job,{active=false}={}){
   if(job.state==='running'&&!active)job={...job,state:'unknown',message:'上次操作已中断或不在当前后台中，请先回查结果，避免重复提交。'};
   const input=job.input||{},files=job.files||{};const [statusLabel,tone]=states[job.state]||['待核实','amber'];
@@ -12,7 +12,7 @@ export function jobView(job,{active=false}={}){
     videoPath:files.video?.path||'',videoName:path.basename(files.video?.path||''),coverPath:files.cover?.path||'',videoSize:files.video?.size||0,
     createdAt:job.createdAt,startedAt:job.startedAt,finishedAt:job.finishedAt,checkedAt:job.checkedAt,
     message:job.message||detailMessage||(p.executionEnabled===false?'小红书草稿尚未完成实机验收，暂不可执行':''),platformWorkId:job.platformWorkId||null,platformUrl:job.platformUrl||null,
-    batchId:input.batchId||null,screenshotPath:job.verification?.screenshot||null,moderation:job.moderation||'unknown',canExecute:!input.batchId&&job.state==='prepared'&&p.executionEnabled!==false,canVerify:!!job.startedAt};
+    batchId:input.batchId||null,trashedAt:job.trashedAt||null,verificationReports:job.verificationReports||[],screenshotPath:job.verification?.screenshot||null,moderation:job.moderation||'unknown',canExecute:!job.trashedAt&&!input.batchId&&job.state==='prepared'&&p.executionEnabled!==false,canVerify:!job.trashedAt&&!!job.startedAt};
 }
 export function validateInput(raw){
   if(!raw||typeof raw!=='object')throw Error('请先填写任务内容');

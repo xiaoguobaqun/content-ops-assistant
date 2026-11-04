@@ -10,6 +10,10 @@ export async function atomicJson(file,value){
 }
 // 独立于引擎锁，避免批次登记后再调用单任务时嵌套持锁。
 export async function withLocalLock(root,work,{waitMs=5000}={}){
+ if(process.platform==='win32'){
+  const {withWindowsLock}=await import('./windows-host.mjs');
+  return withWindowsLock(path.join(root,'metadata.lock.guard'),async()=>work(),{waitMs});
+ }
  await fs.mkdir(root,{recursive:true,mode:0o700});const handle=await fs.open(path.join(root,'metadata.lock'),'a+',0o600);
  try{const until=Date.now()+waitMs;
   while(true){const result=spawnSync('python3',['-c','import fcntl,sys\ntry: fcntl.flock(3,fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError: sys.exit(73)'],{stdio:['ignore','ignore','pipe',handle.fd]});

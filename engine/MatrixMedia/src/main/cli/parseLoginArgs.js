@@ -114,20 +114,15 @@ export function parseLoginArgs(subArgv) {
     const normalized=canonicalAccountPartition(out.partition,'小红书');if(out.phone&&normalized!==buildAccountPartition(out.phone,'小红书'))return {ok:false,error:'小红书账号与分区不匹配'};
     out.partition=normalized;out.show=true;return {ok:true,value:out};
   }
-  if (out.show && out.platform !== '视频号') {
-    console.warn('MatrixMedia: CLI 模式不打开登录窗口，已忽略 --show。')
-    out.show = false
-  }
-
   if (out.browser === 'chrome') {
     out.show = true
     out.terminalQr = false
   } else if (!out.puppeteerHeadless) {
-    if (!out.terminalQr) {
+    if (!out.terminalQr && !out.show) {
       return {
         ok: false,
         error:
-          'CLI 模式不打开浏览器登录窗口。请保留默认终端二维码（勿加 --no-terminal-qr），或使用 --puppeteer-headless。'
+          '请使用 --show 打开本人验证窗口，或保留默认终端二维码，或使用 --puppeteer-headless。'
       }
     }
   } else if (out.platform === '视频号') {
@@ -157,7 +152,7 @@ export function loginHelpText() {
 
 可选 --puppeteer-headless（仅抖音）：用系统 Chrome/Chromium 真无头 + page.screenshot，userDataDir 与 partition 一致（需 PUPPETEER_EXECUTABLE_PATH 或已安装 Chrome/Chromium）。无 TTY 时请配合 --save-qr-png。
 
-视频号登录支持 --show 弹出登录窗口，扫码后窗口自动关闭。
+抖音和视频号登录支持 --show 弹出官方登录窗口。抖音扫码后可能继续要求短信等本人验证，须在此窗口完成；会话保存后窗口自动关闭。
 小红书登录默认显示本人验证窗口，支持页面二维码或本人验证；不支持隐藏、无头、Chrome桥接或强制清理登录态。程序不会填写手机号/验证码或勾选协议。
 重复登录时会先验证既有会话：auth_data 鉴权仍有效则直接返回（退出码 0），不再展示二维码；--force 可强制重登。
 若内置窗口扫码后提示没有可登录的视频号，可用 --browser chrome 在本机 Chrome 中登录。
@@ -168,9 +163,9 @@ export function loginHelpText() {
       --phone <id>      账号手机号（与 GUI 一致，与 --partition 二选一）
       --partition <p>   完整 partition，如 persist:13800138000抖音
       --browser <name>   electron（默认）或 chrome（仅视频号，显示本机 Chrome 登录窗口）
-      --show              弹出登录窗口（视频号默认支持；抖音 CLI 不支持）
+      --show              弹出官方登录窗口，供扫码及短信等本人验证使用
       --hide              不显示窗口（默认即为隐藏）
-      --no-terminal-qr    关闭终端二维码时须使用 --puppeteer-headless
+      --no-terminal-qr    关闭终端二维码时须使用 --show 或 --puppeteer-headless
       --save-qr-png <p>   每次刷新写 PNG（优先 #animate_qrcode_container 内 data: 原图）
       --puppeteer-headless  使用 Puppeteer 无头 Chromium（仅抖音，视频号不支持）
       --timeout-sec <n>   最长等待秒数，默认 900（15 分钟）

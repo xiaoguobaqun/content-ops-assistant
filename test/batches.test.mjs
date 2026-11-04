@@ -1,3 +1,4 @@
+import {mediaTool} from '../src/runtime-paths.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -10,7 +11,7 @@ import {runJob,readJob,verifyJob} from '../src/jobs.mjs';
 import {withCancellation} from '../src/cancellation.mjs';
 async function fixture(t,{engine:extra={},prepare,onProgress}={}){
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'batch-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
- const video=path.join(root,'合成.mp4');const r=spawnSync('/opt/homebrew/bin/ffmpeg',['-v','error','-f','lavfi','-i','color=blue:s=160x90:d=0.2','-c:v','libx264','-pix_fmt','yuv420p',video]);assert.equal(r.status,0);
+ const video=path.join(root,'合成.mp4');const r=spawnSync(mediaTool('ffmpeg'),['-v','error','-f','lavfi','-i','color=blue:s=160x90:d=0.2','-c:v','libx264','-pix_fmt','yuv420p',video]);assert.equal(r.status,0);
  const accounts=['dy','sph','xhs'].map(platform=>({platform,phone:'账号甲',loggedIn:true}));const people=createPeopleStore({root});
  const person=await people.save({name:'人员甲',bindings:Object.fromEntries(accounts.map(a=>[a.platform,{platform:a.platform,phone:a.phone}]))},{accounts});const calls=[];
  const engine={accounts:async()=>accounts,publish:async job=>{calls.push(job.input.platform);return {resultStatus:'draft',draftEvidence:{ok:true}};},queryDraft:async job=>({ok:true,evidence:{ok:true,preserved:true,platform:job.input.platform,clientTaskId:job.id}}),...extra};
@@ -82,4 +83,11 @@ for(const selected of [['dy','sph'],['dy']])test(`metadata contention ${selected
  }});root=f.root;
  const batch=await f.store.prepare({...f.input,platforms:selected});await f.store.execute(batch.id,approval(await f.store.view(batch.id)));
  const result=await f.store.view(batch.id);assert.equal(result.state,'draft_confirmed');assert.equal(result.canExecute,false);assert.deepEqual(f.calls,selected);
+});
+
+test('批次刷新和回收恢复保留子任务报告，退出的旧处理进程不永久阻止删除',async t=>{
+ const f=await fixture(t,{engine:{publish:async()=>({}),queryDraft:async()=>({ok:false})}}),batch=await f.store.prepare({...f.input,platforms:['dy']});await f.store.execute(batch.id,approval(await f.store.view(batch.id)));const id=(await f.store.view(batch.id)).jobs[0].id;
+ await verifyJob(id,{root:f.root,engine:f.engine});assert.equal((await f.store.view(batch.id)).jobs[0].verificationReports.length,1);
+ const parentFile=path.join(f.root,'batches',batch.id,'batch.json'),parent=JSON.parse(await fs.readFile(parentFile));parent.phase='running';parent.ownerPid=99999999;await fs.writeFile(parentFile,JSON.stringify(parent));
+ const {createDesktopService}=await import('../desktop/service-core.mjs'),service=createDesktopService({root:f.root,engine:f.engine});await service.handle('trashTask',{id:batch.id});await service.handle('restoreTask',{id:batch.id});const fresh=await service.handle('dashboard');assert.equal(fresh.jobs[0].jobs[0].verificationReports.length,1);assert.equal(f.calls.length,0);
 });

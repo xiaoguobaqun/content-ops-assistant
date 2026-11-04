@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const {randomUUID}=require('crypto');
 const jsQR = require("jsqr");
 const qrcodeTerminal = require("qrcode-terminal");
 const QRCode = require("qrcode-terminal/vendor/QRCode");
@@ -135,31 +136,20 @@ function shouldSkipQrDecode() {
 }
 
 /**
- * 写入 --save-qr-png：优先 jsQR 解码后重绘干净 PNG；其次 data: 原图；最后才用截图栅格。
+ * 只将可解码二维码重绘后原子写入；页面截图或Logo不能作为扫码图。
  * @param {{ image: import("electron").NativeImage, saveQrPngPath: string, rawBuf?: Buffer | null, fromDataUrl?: boolean }} opts
  */
 function writeLoginQrPngFile({
   image,
   saveQrPngPath,
-  rawBuf = null,
-  fromDataUrl = false,
 }) {
+  const payload=tryDecodeQrPayloadFromNativeImage(image);
+  if(!payload)return false;
   const out = path.resolve(saveQrPngPath);
-  fs.mkdirSync(path.dirname(out), { recursive: true });
-
-  const payload = shouldSkipQrDecode()
-    ? null
-    : tryDecodeQrPayloadFromNativeImage(image);
-  let pngBuf;
-  if (payload) {
-    pngBuf = renderQrPayloadToPngBuffer(payload);
-  } else if (fromDataUrl && rawBuf && rawBuf.length) {
-    pngBuf = rawBuf;
-  } else {
-    pngBuf = image.toPNG();
-  }
-
-  fs.writeFileSync(out, pngBuf);
+  fs.mkdirSync(path.dirname(out), { recursive: true,mode:0o700 });
+  const temporary=out+'.'+randomUUID()+'.tmp';
+  try{fs.writeFileSync(temporary,renderQrPayloadToPngBuffer(payload),{flag:'wx',mode:0o600});fs.renameSync(temporary,out);}finally{fs.rmSync(temporary,{force:true});}
+  return true;
 }
 
 export {

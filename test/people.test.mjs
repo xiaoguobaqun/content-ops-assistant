@@ -9,7 +9,7 @@ test('people bind one existing account per platform without changing engine reco
  const {root,store}=await fixture(t),original=structuredClone(accounts);
  const person=await store.save({name:' 人员甲 ',bindings:{dy:{platform:'dy',phone:'账号A'},sph:{platform:'sph',phone:'账号A'}}},{accounts});
  assert.equal(person.name,'人员甲');assert.equal(person.revision,1);assert.equal((await store.list()).length,1);assert.deepEqual(accounts,original);
- assert.equal((await fs.stat(path.join(root,'people.json'))).mode&0o777,0o600);
+ if(process.platform!=='win32')assert.equal((await fs.stat(path.join(root,'people.json'))).mode&0o777,0o600);
  await assert.rejects(store.save({name:'人员甲',bindings:{}},{accounts}),/名称|同名/);
  await assert.rejects(store.save({name:'人员乙',bindings:{dy:{platform:'dy',phone:'账号A'}}},{accounts}),/归属|绑定/);
  await assert.rejects(store.save({name:'不存在账号',bindings:{dy:{platform:'dy',phone:'没有'}}},{accounts}),/账号/);

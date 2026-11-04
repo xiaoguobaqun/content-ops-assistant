@@ -51,6 +51,14 @@ const cliMode = isCliMode(process.argv);
 if (app.name !== "matrix-video") {
   app.name = "matrix-video";
 }
+// 安装版为当前用户隔离保存；默认路径继续由原引擎管理，不迁移或复制登录态。
+for (const [key, variable] of [["userData", "CONTENT_OPS_ENGINE_USER_DATA"], ["documents", "CONTENT_OPS_DOCUMENTS"]]) {
+  if (process.env[variable]) {
+    if (!path.isAbsolute(process.env[variable])) throw new Error("应用数据目录必须使用绝对路径");
+    fs.mkdirSync(process.env[variable], { recursive: true });
+    app.setPath(key, process.env[variable]);
+  }
+}
 installMainProcessLogFile(app);
 
 if (process.platform === "win32") {

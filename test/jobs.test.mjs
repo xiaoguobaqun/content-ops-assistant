@@ -1,3 +1,4 @@
+import {mediaTool} from '../src/runtime-paths.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -8,7 +9,7 @@ import { spawnSync,spawn } from 'node:child_process';
 let fixture;
 test.before(async () => {
   fixture = await fs.mkdtemp(path.join(os.tmpdir(), 'content-ops-fixture-'));
-  const r = spawnSync('/opt/homebrew/bin/ffmpeg', ['-hide_banner','-loglevel','error','-f','lavfi','-i','color=c=blue:s=320x180:d=0.3','-c:v','libx264','-pix_fmt','yuv420p',path.join(fixture,'素材 $a; `b`.mp4')]);
+  const r = spawnSync(mediaTool('ffmpeg'), ['-hide_banner','-loglevel','error','-f','lavfi','-i','color=c=blue:s=320x180:d=0.3','-c:v','libx264','-pix_fmt','yuv420p',path.join(fixture,'素材 $a; `b`.mp4')]);
   assert.equal(r.status, 0, r.stderr?.toString());
 });
 test.after(async () => { await fs.rm(fixture,{recursive:true,force:true}); });
@@ -23,7 +24,7 @@ test('prepare validates local media, defaults private and extracts a real 3:4 co
   const {prepareJob} = await api(); const {root,input} = await context(t);
   const job = await prepareJob(input,{root});
   assert.equal(job.input.visibility,'private'); assert.equal(job.state,'prepared');
-  const r = spawnSync('/opt/homebrew/bin/ffprobe',['-v','error','-show_entries','stream=width,height','-of','json',job.files.cover.path]);
+  const r = spawnSync(mediaTool('ffprobe'),['-v','error','-show_entries','stream=width,height','-of','json',job.files.cover.path]);
   const cover = JSON.parse(r.stdout).streams[0]; assert.equal(cover.width/cover.height, 3/4);
   await assert.rejects(prepareJob({...input,video:'/missing/video.mov'},{root}), /视频|不存在|ENOENT/);
   await assert.rejects(prepareJob({...input,visibility:'typo'},{root}), /可见范围/);
@@ -74,9 +75,63 @@ test('failed baseline prevents actual submit and unsafe job paths are rejected',
   assert.equal(result.state,'unknown');
   await assert.rejects(readJob('../../secrets',{root}), /编号/);
 });
+test('a newly created work keeps its identity while privacy is unknown and later verifies without reupload',async t=>{
+  const {prepareJob,runJob,verifyJob,readJob}=await api();const {root,input}=await context(t,{mode:'publish',visibility:'public'});
+  const job=await prepareJob(input,{root});let queries=0,publishes=0,visibility=null;
+  const work={workId:'7702023091953618217',title:input.title,description:input.description,publishTime:Date.now(),visibility};
+  const engine={publish:async()=>{publishes++;return {outcome:'submission_unknown'};},query:async()=>({complete:true,works:++queries===1?[]:[{...work,publishTime:Date.now(),visibility}]})};
+  const result=await runJob(job.id,{root,engine});
+  assert.equal(result.state,'unknown');assert.equal(result.platformWorkId,work.workId);
+  assert.equal(result.verification.creation.status,'confirmed');assert.equal(result.verification.visibility.status,'unknown');assert.equal(result.moderation,'unknown');
+  assert.match(result.message,/已创建/);assert.match(result.message,/公开/);assert.match(result.message,/核实/);
+  assert.equal((await readJob(job.id,{root})).platformWorkId,work.workId);
+  await runJob(job.id,{root,engine});assert.equal(publishes,1);
+  visibility='private';const mismatch=await verifyJob(job.id,{root,engine});assert.equal(mismatch.state,'unknown');assert.equal(mismatch.verification.visibility.status,'unknown');assert.equal(mismatch.verification.creation.status,'confirmed');
+  visibility='public';const checked=await verifyJob(job.id,{root,engine});
+  assert.equal(checked.state,'confirmed');assert.equal(checked.verification.visibility.status,'confirmed');assert.equal(checked.moderation,'unknown');assert.equal(checked.message,undefined);assert.equal(publishes,1);
+});
+test('work creation is persisted before the separate identity lookup can fail',async t=>{
+  const {prepareJob,runJob,readJob}=await api();const {root,input}=await context(t,{mode:'publish'});const job=await prepareJob(input,{root});let queries=0,publishes=0;
+  const engine={publish:async()=>{publishes++;return {outcome:'submission_unknown'};},query:async(phone,workId)=>{
+    if(++queries===1)return {complete:true,works:[]};
+    if(queries===2)return {complete:true,works:[{workId:'7702023091953618217',title:input.title,description:input.description,publishTime:Date.now(),visibility:null}]};
+    const persisted=await readJob(job.id,{root});assert.equal(workId,'7702023091953618217');assert.equal(persisted.platformWorkId,workId);assert.equal(persisted.verification.creation.status,'confirmed');
+    throw Error('platform exception: Cookie=private-review-value');
+  }};
+  const result=await runJob(job.id,{root,engine});assert.equal(result.state,'unknown');assert.equal(result.platformWorkId,'7702023091953618217');assert.match(result.message,/已创建/);assert.match(result.message,/回查未完成/);assert.doesNotMatch(result.message,/Cookie|private-review-value/);
+  await runJob(job.id,{root,engine});assert.equal(publishes,1);
+});
+test('a failed result query shows its safe cause while preserving creation and preventing replay',async t=>{
+  const {prepareJob,runJob,verifyJob}=await api();const {root,input}=await context(t,{mode:'publish'});const job=await prepareJob(input,{root});let queries=0,publishes=0;
+  const engine={publish:async()=>{publishes++;return {outcome:'submission_unknown'};},query:async()=>{
+    if(++queries===1)return {complete:true,works:[]};
+    if(queries===2)return {complete:true,works:[{workId:'7702023091953618217',title:input.title,description:input.description,publishTime:Date.now(),visibility:null}]};
+    return {complete:false,works:[],reason:'work_list_http',message:'Cookie=private-review-value'};
+  }};
+  const result=await runJob(job.id,{root,engine});assert.equal(result.state,'unknown');assert.equal(result.platformWorkId,'7702023091953618217');assert.match(result.message,/已创建/);assert.match(result.message,/接口请求失败/);assert.doesNotMatch(result.message,/Cookie|private-review-value/);
+  const checked=await verifyJob(job.id,{root,engine});assert.equal(checked.verification.creation.status,'confirmed');assert.match(checked.message,/接口请求失败/);
+  await runJob(job.id,{root,engine});assert.equal(publishes,1);
+});
+test('ambiguous new works and same-content old works never acquire a created-work identity',async t=>{
+  const {prepareJob,runJob}=await api();const {root,input}=await context(t,{mode:'publish'});
+  const work={workId:'7702023091953618217',title:input.title,description:input.description,visibility:'private'};
+  for(const scenario of ['old','ambiguous']){
+    const job=await prepareJob(input,{root});let queries=0;
+    const engine={publish:async()=>({outcome:'submission_unknown'}),query:async()=>({complete:true,works:++queries===1?(scenario==='old'?[{...work,publishTime:1}]:[]):scenario==='old'?[{...work,publishTime:1}]:[{...work,publishTime:Date.now()},{...work,workId:'7702023091953618218',publishTime:Date.now()}]})};
+    const result=await runJob(job.id,{root,engine});assert.equal(result.state,'unknown');assert.equal(result.platformWorkId,undefined);assert.equal(result.verification.creation.status,'unknown');
+  }
+});
+test('baseline failures show a safe actionable cause while keeping submission blocked',async t=>{
+  const {prepareJob,runJob}=await api();const {root,input}=await context(t,{mode:'publish'});
+  for(const [failure,expected] of [[{reason:'work_list_http'},/接口请求失败/],[{reason:'missing_cursor'},/分页/],[{message:'登录态失效，请先登录'},/登录/],[{reason:'Cookie: private-value',message:'secret private-value'},/原因尚未识别/]]){
+    const job=await prepareJob(input,{root});let calls=0;const engine={query:async()=>({complete:false,works:[],...failure}),publish:async()=>{calls++;}};
+    const result=await runJob(job.id,{root,engine});assert.equal(result.state,'unknown');assert.match(result.message,expected);assert.match(result.message,/停止/);assert.doesNotMatch(result.message,/private-value/);
+    await runJob(job.id,{root,engine});assert.equal(calls,0);
+  }
+});
 test('an interrupted legacy guard cannot permanently block acquisition',async t=>{
   const {prepareJob,runJob}=await api();const {root,input}=await context(t);
-  const job=await prepareJob(input,{root});await fs.mkdir(path.join(root,'engine.lock.guard'));
+  const job=await prepareJob(input,{root});await fs.mkdir(path.join(root,process.platform==='win32'?'engine.lock.legacy-guard':'engine.lock.guard'));
   const result=await runJob(job.id,{root,engine:{publish:async()=>({resultStatus:'draft',draftEvidence:{ok:true}})}});
   assert.equal(result.state,'draft_confirmed');
 });
@@ -87,7 +142,7 @@ test('dead wrapper ownership cannot be reclaimed while its engine group remains 
   try{
     await fs.writeFile(path.join(root,'engine.lock'),JSON.stringify({pid:99999999,phase:'running',pgid:child.pid}));
     await assert.rejects(runJob(job.id,{root,engine:{publish:()=>assert.fail('orphan engine still owns account')}}),/进程|引擎|运行/);
-  }finally{process.kill(-child.pid,'SIGTERM');await new Promise(r=>child.once('close',r));}
+  }finally{process.platform==='win32'?child.kill('SIGTERM'):process.kill(-child.pid,'SIGTERM');await new Promise(r=>child.once('close',r));}
 });
 test('verification mismatch retains unknown and never runs publish again',async t=>{
   const {prepareJob,runJob,verifyJob}=await api();const {root,input}=await context(t);const job=await prepareJob(input,{root});

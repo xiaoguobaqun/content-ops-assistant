@@ -28,7 +28,7 @@ ELECTRON_RUN_AS_NODE= electron . cli publish --help
 ### 抖音 CLI 登录
 
 - **登录判定**：轮询 `https://creator.douyin.com` 下 Cookie `passport_assist_user`。
-- **窗口模式**：默认屏外隐藏窗口 + 终端二维码；支持 `--puppeteer-headless` 无头模式。
+- **窗口模式**：默认隐藏窗口 + 终端二维码；`--show` 显示官方登录窗口，供扫码后继续完成短信等本人验证。也支持 `--puppeteer-headless` 无头模式；需要本人验证时应改用可见窗口。
 - `--show` 会被忽略（不弹窗）。
 
 ```bash
@@ -269,6 +269,20 @@ matrixmedia cli stats-work -p ks --phone 123 --title "你家猫也这样睡？�
 
 ## 本机助手的小红书账号阶段
 
+### 抖音扫码图与等待范围
+
+`--save-qr-png`只把成功解码的二维码重绘并原子写成PNG，不再保存无法识别的页面截图。抖音优先读取官方动效登录容器；当前页面的amemv跳转格式要求容器归属与登录token同时成立，整页中的下载推广码不得冒充登录码。裁剪不适配时可从整页寻找已知登录扫描地址，但不输出整页作为扫码图。诊断日志不输出二维码内容或参数值。
+
+抖音在DOM就绪后开始获取，首次立即尝试、未就绪时短间隔重试，同一时刻只运行一轮抓图。停止或登录结束后不重启循环；普通Electron分支的期限覆盖初始化，Puppeteer分支的启动与页面加载也消耗同一等待预算。终端的栅格调试选项不放宽保存PNG的核验条件。尚未取得有效码不表示已经登录，手机确认与后续账号回读仍必需。
+
+普通Electron登录分支在二维码出现前检测到官方组件 `ChunkLoadError` 时，绕过HTTP资源缓存重载一次，沿用原期限。再次失败返回退出码3和 `dy-login` 的固定失败原因 `login-component-load-failed`，不输出原始页面错误或凭据，不清除Cookie或草稿存储；二维码已经显示后不再自动重载。
+
+### account-remove：退出此应用登录并移除本机账号
+
+先运行 `cli account-remove --platform dy|sph|xhs --phone <名称> --preview`，取得无副作用的登记摘要；明确确认后用同样的平台与名称传入 `--expected-digest <摘要>` 执行。预览与执行分别返回 `channel:"account-remove"`、`phase:"preview"|"removed"`；成功退出返回 `loggedOut:true`，失败退出码为4，参数错误为2。调用方必须持有执行引擎锁，桌面入口另有原生确认、人员绑定和后台忙碌保护，并先作废旧待执行任务。
+
+只清理唯一标准分区的 Cookie 与认证缓存，视频号另移除该分区的登录恢复备份；核实没有残留 Cookie 后移除所有匹配登记。保留其他账号、平台作品、Web Storage 与 IndexedDB 草稿；不导出或复制凭据。共享/异常分区、独立浏览器模式、损坏记录或摘要变化均停止。失败不报告成功，已退出但登记写入失败时需刷新核对，不自动重试。
+
 `cli login -p xhs --phone <本机名称> --show [--save-qr-png <路径>]` 使用标准小红书分区及可见本人验证窗口。扫码或手机号/验证码均由本人完成，程序不勾选协议、不清理会话、不使用Chrome Cookie桥接。只有页面自身返回的本人信息鉴权与原分区身份匹配，才可返回登录成功；网络或响应未知不当作成功。扫码图必须可解码为小红书登录URL，登录结束后移除。
 
 `cli accounts -p xhs --json` 支持独立小红书筛选，真实鉴权未知时 `loggedIn:null`，不以Cookie存在冒称已连接。
@@ -280,3 +294,21 @@ matrixmedia cli stats-work -p ks --phone 123 --title "你家猫也这样睡？�
 `cli xhs-draft --phone <名称> --expected-file <绝对JSON路径> [--screenshot <绝对路径>]`仅恢复核验已完整保存的本机草稿；JSON含clientTaskId、title、description、checkpointPath。需匹配已完成的检查点、稳定媒体/草稿摘要及原样保留证据。未完成文案或自选封面的自动草稿保持未知，不补写、不重传。清理浏览器数据会删除草稿。
 
 受管草稿仅经离线夹具验证，真实封面/暂存/恢复未验收；内容运营助手桌面的执行门闩仍关闭。不能把登录、上传或只读检查完成当作草稿闭环成功。
+
+### 明确授权后补全已有的小红书测试草稿
+
+`cli xhs-complete-draft --phone <名称> --expected-file <绝对JSON路径> [--screenshot <绝对图片路径>]` 是独立的修改入口，不改变 `xhs-draft` 的只读语义。仅在用户明确同意补全特定原草稿后使用；不接受视频文件、发布、删除、force或inspect参数，不重新上传视频。
+
+授权JSON必须提供 `action: "complete-existing-draft"`、`platform: "xhs"`、`clientTaskId`、原 `title`/`description`、`checkpointPath`、`sourceVideoSha` 和 `sourceCoverSha`。原检查点需有同分区、空基线、可信视频信息及实际上传选择SHA；草稿须唯一、属本人，并与原媒体、任务时间窗或已绑定标识匹配。缺封面证据的旧检查点不能借此自动验收成功。
+
+补全只填空白字段或接受与目标完全一致的字段，不覆盖冲突文案、未知自选封面或其他草稿。写入前持独占claim并重新读取检查点，保存前持久化 `save-click-started`，只点击一次“暂存离开”。返回 `requiresVerification: true`，仍须独立 `xhs-draft` 恢复和关闭后的保留核验，不得把补全返回当成功。
+
+保存点击后异常不得再次补全或保存；若原视频、实际选择、自选封面来源及显示身份等证据完整，只读查询可从唯一匹配的已存文案/封面重新取得内容摘要，再执行独立恢复及保留检查，不能补写内容。正常信号/退出清理本次claim；强杀遗留claim时，仅在持有PID明确已退出后允许只读回查，保留claim，不因此开放再次保存。进程状态或检查点无法核实时继续停止。
+
+### profile-sample：本人账号只读样本
+
+`cli profile-sample --capabilities` 返回 `channel: "profile-sample-capabilities"` 和 `platforms`，其中每个平台的 `available` 与 `reason` 表明当前能力。当前 dy、sph、xhs 均不可用：现有读取路径尚未证明作品响应与已核验本人身份的绑定。该命令不启动窗口或请求，不读取会话，也不登录或改动作品。
+
+`cli profile-sample --platform dy|sph|xhs --phone <分组> [--limit 1..20]` 默认上限 20。当前返回 `channel: "profile-sample"`、`ok: false`、`identity: {verified: false, ownerHash: null}`、空 `works`、`overview: null` 和 `coverage: {limit, returned: 0, complete: false, reason: "identity_unverified"}`，附带可读的 `message` 和毫秒时间戳 `collectedAt`。失败退出码为 4，参数错误为 2。没有样本不代表账号没有作品。未来启用平台必须先验证本人身份与每个作品响应的归属，并标明分页是否完整；未知指标须为 null，不能将样本合计表述为账号总量。
+
+能力项中的 `liveVerified: false` 表示真实采集尚未验收。小红书有离线分页核心，要求本人鉴权成功并由每一页提供与本人一致的独立归属证据；现有笔记接口尚无已验证的归属字段提取方式，因此它没有接入 CLI 或真实请求。启用前还须验证接口归属证据、字段含义、会话切换和取消时窗口及请求清理。

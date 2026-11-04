@@ -93,7 +93,7 @@ export async function runManagedXhsDraft(v,{withPage=withXhsPage}={}){
         if(diagnostic){diagnostic.responses=auth.diagnostic;const client=await page.target().createCDPSession();try{await client.send('DOM.enable');const {nodes}=await client.send('DOM.getFlattenedDocument',{depth:-1,pierce:true});diagnostic.closedControls=nodes.filter(n=>['BUTTON','XHS-PUBLISH-BTN'].includes(n.nodeName)).map(n=>{const attrs={};for(let i=0;i<(n.attributes||[]).length;i+=2)if(['class','type','disabled','role','aria-label','save-text','submit-text','save-disabled','submit-disabled'].includes(n.attributes[i]))attrs[n.attributes[i]]=n.attributes[i+1];return {tag:n.nodeName,attrs,text:(n.children||[]).filter(x=>x.nodeType===3).map(x=>x.nodeValue).join('')};});}finally{await client.detach();}fs.writeFileSync(path.join(dir,'xhs-diagnostic.json'),JSON.stringify(diagnostic,null,2),{mode:0o600});}
         throw error;
       }finally{await auth.dispose();}
-    },{show:true,title:'小红书示例素材草稿'});
+    },{show:true,title:'小红书测试素材草稿'});
   }catch(error){
     if(page&&!page.isClosed()){
       const dir=path.dirname(v.checkpointFile);await page.screenshot({path:path.join(dir,'xhs-diagnostic.png'),fullPage:true}).catch(()=>{});

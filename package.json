@@ -1,11 +1,11 @@
 {
   "name": "content-ops-assistant",
-  "version": "0.1.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "license": "GPL-2.0-only",
   "engines": { "node": ">=20" },
-  "os": ["darwin", "linux"],
+  "os": ["darwin", "linux", "win32"],
   "bin": { "content-ops": "bin/content-ops.mjs" },
-  "scripts": { "test": "node scripts/run-tests.mjs", "doctor": "node bin/content-ops.mjs doctor", "desktop": "node scripts/start-desktop.mjs", "build:desktop": "node scripts/build-desktop.mjs" }
+  "scripts": { "test": "node scripts/run-tests.mjs", "doctor": "node bin/content-ops.mjs doctor", "desktop": "node scripts/start-desktop.mjs", "build:desktop": "node scripts/build-desktop.mjs", "build:windows": "node scripts/build-windows.mjs", "test:windows-smoke": "node scripts/windows-smoke.mjs" }
 }

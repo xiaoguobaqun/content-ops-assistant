@@ -51,7 +51,18 @@ const { nativeImageToBlockLines, nativeImageToHalfBlockLines } = require(blocksB
 
 (() => {
   const r = parseLoginArgs(["-p", "dy", "--phone", "1", "--show", "--no-terminal-qr"]);
-  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.value.show, true);
+  assert.strictEqual(r.value.terminalQr, false);
+})();
+
+(() => {
+  const r = parseLoginArgs(["-p", "dy", "--phone", "1", "--show", "--save-qr-png", "/tmp/verification-qr.png"]);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.value.show, true, "短信本人验证窗口不能被参数解析层静默隐藏");
+  assert.strictEqual(r.value.saveQrPng, "/tmp/verification-qr.png");
+  const hidden = parseLoginArgs(["-p", "dy", "--phone", "1", "--show", "--hide"]);
+  assert.strictEqual(hidden.value.show, false);
 })();
 
 (() => {

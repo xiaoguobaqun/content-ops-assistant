@@ -1,11 +1,13 @@
 const {spawn}=require('node:child_process');const readline=require('node:readline');const fs=require('node:fs');const path=require('node:path');const os=require('node:os');
-function createWorkerClient({node,projectRoot,documentsPath,onEvent=()=>{},onExit=()=>{},stopGraceMs=15000}){
+function createWorkerClient({node,projectRoot,dataRoot=path.join(projectRoot,'.local'),engineUserData,runtimeBin,documentsPath,onEvent=()=>{},onExit=()=>{},stopGraceMs=15000}){
   const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;
-  env.PATH=[path.dirname(node),'/opt/homebrew/bin','/usr/local/bin','/usr/bin','/bin',process.env.PATH||''].join(':');
+  env.PATH=[path.dirname(node),runtimeBin,...(process.platform==='win32'?[]:['/opt/homebrew/bin','/usr/local/bin','/usr/bin','/bin']),process.env.PATH||''].filter(Boolean).join(path.delimiter);
+  env.CONTENT_OPS_DATA_ROOT=dataRoot;
+  if(engineUserData)env.CONTENT_OPS_ENGINE_USER_DATA=engineUserData;
   if(documentsPath&&path.isAbsolute(documentsPath))env.CONTENT_OPS_DOCUMENTS=documentsPath;
   const child=spawn(node,[path.join(projectRoot,'desktop/service.mjs')],{cwd:os.tmpdir(),env,stdio:['pipe','pipe','pipe']});
   let sequence=0,closed=false,activity=null,stopPromise=null;const pending=new Map();
-  const logDir=path.join(projectRoot,'.local','desktop');fs.mkdirSync(logDir,{recursive:true,mode:0o700});const log=fs.createWriteStream(path.join(logDir,'service.log'),{flags:'a',mode:0o600});child.stderr.pipe(log);
+  const logDir=path.join(dataRoot,'desktop');fs.mkdirSync(logDir,{recursive:true,mode:0o700});const log=fs.createWriteStream(path.join(logDir,'service.log'),{flags:'a',mode:0o600});child.stderr.pipe(log);
   const lines=readline.createInterface({input:child.stdout});
   lines.on('line',line=>{let message;try{message=JSON.parse(line);}catch{return;}
     if(message.event){if(message.event.activity)activity=message.event.activity;onEvent(message.event);return;}
@@ -18,7 +20,7 @@ function createWorkerClient({node,projectRoot,documentsPath,onEvent=()=>{},onExi
   return {
     request(method,args={}){if(closed)return Promise.reject(Error('后台服务已停止，请重新打开应用'));const id=++sequence;return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(Error('这项操作暂时没有响应，请查看任务记录后再继续'));},180000);pending.set(id,{resolve,reject,timer});child.stdin.write(JSON.stringify({id,method,args})+'\n',error=>{if(error){clearTimeout(timer);pending.delete(id);reject(error);}});});},
     get busy(){return activity?.status==='running';},
-    stop(){if(stopPromise)return stopPromise;if(closed)return Promise.resolve();stopPromise=(async()=>{const ended=new Promise(resolve=>child.once('close',resolve));child.kill('SIGTERM');const timer=setTimeout(()=>child.kill('SIGKILL'),stopGraceMs);await ended;clearTimeout(timer);})();return stopPromise;},
+    stop(){if(stopPromise)return stopPromise;stopPromise=(async()=>{if(!closed){const ended=new Promise(resolve=>child.once('close',resolve));child.stdin.end();const timer=setTimeout(()=>child.kill('SIGKILL'),stopGraceMs);await ended;clearTimeout(timer);}if(process.platform==='win32'){const {withWindowsLock}=await import('../src/windows-host.mjs');await withWindowsLock(path.join(dataRoot,'engine.lock.guard'),async()=>{},{waitMs:15000});}})();return stopPromise;},
   };
 }
 module.exports={createWorkerClient};

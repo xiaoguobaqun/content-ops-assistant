@@ -1,0 +1,101 @@
+name: Windows source verification
+
+on:
+  push:
+    branches: [main, codex/windows-installer]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-source-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CI: true
+      CSC_IDENTITY_AUTO_DISCOVERY: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+      - name: Isolate offline verification data
+        shell: pwsh
+        run: |
+          "CONTENT_OPS_DATA_ROOT=$env:RUNNER_TEMP\content-ops-offline-data" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CONTENT_OPS_DOCUMENTS=$env:RUNNER_TEMP\content-ops-offline-documents" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CONTENT_OPS_ENGINE_USER_DATA=$env:RUNNER_TEMP\content-ops-offline-engine" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Compile Windows native protection first
+        run: node scripts/build-windows-host.mjs
+      - name: Native guardian crash and cancellation regression
+        run: node --test test/windows-native.test.mjs
+      - name: Install locked engine dependencies
+        working-directory: engine/MatrixMedia
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          yarn install --frozen-lockfile --non-interactive
+      - name: Prepare pinned media tools and Chrome
+        shell: pwsh
+        run: |
+          node scripts/build-windows.mjs --prepare-tools
+          if ($LASTEXITCODE -ne 0) { throw 'Media tools preparation failed' }
+          $chrome = @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $chrome) { throw 'Chrome is required for offline browser fixtures' }
+          "CONTENT_OPS_CHROME=$chrome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Root regression suite including process and lock protection
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          node scripts/run-tests.mjs 2>&1 | Tee-Object -FilePath dist/windows-root-tests.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Root regression suite failed' }
+      - name: Offline engine regression checks
+        working-directory: engine/MatrixMedia
+        shell: pwsh
+        run: |
+          $tests = @('test-account-partition.js','test-cli-login.js','test-publish-article-args.js','test-account-login-window-manager.js','test-puppeteer-cancel.js','test-pick-release-installer.js','test-publish-draft-args.js','test-sph-login-backup.js')
+          foreach ($test in $tests) {
+            node "scripts/$test"
+            if ($LASTEXITCODE -ne 0) { throw "Engine regression failed: $test" }
+          }
+      - name: Build engine
+        run: |
+          node scripts/build-engine.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Engine build failed' }
+      - name: Archive verified source and checksum
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          git archive --format=zip --prefix=content-ops-assistant/ --output="dist/Content-Ops-Assistant-$version-source.zip" HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Source export failed' }
+          $source = Get-Item "dist/Content-Ops-Assistant-$version-source.zip"
+          "$( (Get-FileHash $source.FullName -Algorithm SHA256).Hash.ToLowerInvariant() )  $($source.Name)" | Out-File dist/SHA256SUMS.txt -Encoding ascii
+          @('Windows source foundation only; no installer is distributed.', 'Native protection, root and engine offline checks and engine build passed.', 'Real Windows platform login, video upload, draft and publishing have not been accepted.') | Out-File dist/VERIFICATION.txt -Encoding utf8
+      - name: Upload source and offline verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: content-ops-windows-source
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            dist/Content-Ops-Assistant-*-source.zip
+            dist/SHA256SUMS.txt
+            dist/VERIFICATION.txt
+            dist/windows-root-tests.txt
+      - name: Retain failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-failure-evidence
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            dist/windows-root-tests.txt
