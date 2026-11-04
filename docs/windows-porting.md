@@ -1,5 +1,7 @@
 # Windows 基础适配与开发
 
+[返回首页](../README.md) · [源码运行准备](development.md) · [操作手册](user-guide.md)
+
 目标系统为 Windows 10/11 x64。本次只向 GitHub 交付净化源码及基础适配，暂不分发 Windows 安装包。安装构建和隔离验证脚本保留在源码中，默认自动流程不构建、上传安装包或创建 Release。
 
 保留的安装构建脚本可打包 Node 20、Electron、发布引擎、ffmpeg/ffprobe 和 Windows 原生任务保护程序，目标是让安装后的用户无需另装开发工具。安装器未配置商业代码签名证书；未来分发前仍需核对实际使用和验收范围。
@@ -30,15 +32,13 @@ Windows 使用独占文件句柄和 Job Object 管理引擎进程树；先将挂
 
 ## 从源码构建
 
-发布仓库中的引擎为展开源码目录，无需额外私有子模块。使用 Node 20.x、Yarn 1.22.22，在 Windows x64 下：
+首次使用请先按源码运行文档准备 Node 20.x、Yarn 1.22.22 和引擎依赖，然后在 Windows x64 的 PowerShell 中继续。[查看环境准备](development.md#安装引擎依赖)
 
 ```powershell
-cd engine/MatrixMedia
-yarn install --frozen-lockfile
-cd ../..
 node scripts/build-windows-host.mjs
-node scripts/build-windows.mjs --prepare-tools
-# 将上一步输出的工具绝对路径设置为 CONTENT_OPS_FFMPEG、CONTENT_OPS_FFPROBE。
+$tools = node scripts/build-windows.mjs --prepare-tools | ConvertFrom-Json
+$env:CONTENT_OPS_FFMPEG = $tools.ffmpeg
+$env:CONTENT_OPS_FFPROBE = $tools.ffprobe
 # 浏览器夹具可通过 CONTENT_OPS_CHROME 指向 Chrome。
 node scripts/run-tests.mjs
 node scripts/build-engine.mjs
